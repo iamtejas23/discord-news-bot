@@ -1,6 +1,6 @@
 """Feed parsing and article normalization."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import html
 from html.parser import HTMLParser
 import logging
@@ -40,6 +40,27 @@ def format_date(value: str | None) -> str:
 
 def priority_news(title: str) -> bool:
     return any(keyword in title.lower() for keyword in KEYWORDS)
+
+
+def parse_published_date(item: Any) -> datetime | None:
+    """Parse RSS dates as timezone-aware UTC datetimes."""
+    for parsed_value in (item.get("published_parsed"), item.get("updated_parsed")):
+        if parsed_value:
+            try:
+                return datetime(*parsed_value[:6], tzinfo=timezone.utc)
+            except (TypeError, ValueError, OverflowError):
+                LOGGER.warning("Invalid structured published date: %r", parsed_value)
+
+    raw_value = item.get("published") or item.get("updated")
+    if not raw_value:
+        return None
+    try:
+        parsed_date = parser.parse(raw_value)
+        if parsed_date.tzinfo is None:
+            parsed_date = IST.localize(parsed_date)
+        return parsed_date.astimezone(timezone.utc)
+    except (ValueError, TypeError, OverflowError, parser.ParserError):
+        return None
 
 
 class _OpenGraphParser(HTMLParser):
@@ -101,8 +122,9 @@ def extract_image_url(item: Any, article_url: str) -> str | None:
 
 
 class NewsService:
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, recent_news_hours: int = 24):
         self.database = database
+        self.recent_news_hours = recent_news_hours
 
     def get_news(self, source: str | None = None, topic: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
         feeds = FEEDS if not source or source == "All" else {source: FEEDS[source]}
@@ -119,6 +141,14 @@ class NewsService:
                 url = item.get("link")
                 if not url:
                     continue
+                published_date = parse_published_date(item)
+                if published_date is None:
+                    LOGGER.info("Skipping article %s: missing date", url)
+                    continue
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=self.recent_news_hours)
+                if published_date < cutoff:
+                    LOGGER.info("Skipping article %s: old article (%s)", url, published_date.isoformat())
+                    continue
                 title = clean_text(item.get("title", "No title"))
                 summary = clean_text(item.get("summary", ""))
                 if topic and topic.lower() not in f"{title} {summary}".lower():
@@ -130,12 +160,14 @@ class NewsService:
                     "source": name,
                     "title": title,
                     "summary": summary,
-                    "published": item.get("published", ""),
+                    "published": item.get("published") or item.get("updated", ""),
                     "category": feed_config["category"],
                     "image_url": extract_image_url(item, url),
                 }
                 if self.database.claim(article):
                     result.append(article)
+                else:
+                    LOGGER.info("Skipping article %s: duplicate article", url)
                 if len(result) >= limit:
                     return result
         return result

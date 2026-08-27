@@ -27,12 +27,13 @@ LOGGER = logging.getLogger(__name__)
 config = Config.from_env()
 database = Database(config.database_path)
 database.initialize()
-news_service = NewsService(database)
+news_service = NewsService(database, recent_news_hours=config.recent_news_hours)
 
 TOKEN = config.token
 CHANNEL_ID = config.channel_id
 DB = config.database_path
 NEWS_INTERVAL = config.news_interval_minutes
+RECENT_NEWS_HOURS = config.recent_news_hours
 
 
 def init_db() -> None:
