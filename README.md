@@ -1,1 +1,20 @@
-# test deployment
+# Discord News Bot
+
+The bot fetches RSS news, publishes Discord embeds, and stores delivery state in SQLite so an article is not posted twice. The existing deployment contract remains unchanged: run `python app/bot.py` or use Docker Compose.
+
+## Configuration
+
+Required environment variables:
+
+- `DISCORD_TOKEN`
+- `DISCORD_CHANNEL_ID`
+
+Optional variables:
+
+- `NEWS_DATABASE_PATH` (default: `/data/news.db`)
+- `NEWS_INTERVAL_MINUTES` (default: `30`)
+- `LOG_LEVEL` (default: `INFO`)
+
+SQLite claims an article before delivery and marks it posted only after Discord accepts the message. Failed sends are released for retry, and abandoned claims expire after one hour. Keep the `/data` volume when deploying so duplicate protection survives restarts.
+
+Available slash commands are `/news`, `/status`, `/sources`, and `/health`.
