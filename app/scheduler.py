@@ -21,6 +21,9 @@ class NewsScheduler:
     def start(self) -> None:
         if not self.loop.is_running():
             self.loop.start()
+            LOGGER.info("News scheduler started")
+        else:
+            LOGGER.debug("News scheduler is already running")
 
     def is_running(self) -> bool:
         return self.loop.is_running()

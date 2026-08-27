@@ -95,7 +95,12 @@ news_loop = scheduler.loop
 @app_commands.describe(topic="Only show articles matching this topic")
 async def news(interaction: discord.Interaction, topic: str | None = None):
     await interaction.response.defer()
-    articles = await asyncio.to_thread(news_service.get_news, topic=topic, limit=10)
+    try:
+        articles = await asyncio.to_thread(news_service.get_news, topic=topic, limit=10)
+    except Exception:
+        LOGGER.exception("Unable to fetch news for slash command")
+        await interaction.followup.send("Unable to fetch news right now.")
+        return
     if not articles:
         await interaction.followup.send("No new news found")
         return
@@ -128,16 +133,28 @@ async def health(interaction: discord.Interaction):
 
 @bot.tree.command(name="status", description="Feed status")
 async def status(interaction: discord.Interaction):
-    lines = await asyncio.to_thread(news_service.feed_status)
-    counts = database.counts()
-    lines.append(f"Stored: {counts.get('posted', 0)} | Pending: {counts.get('pending', 0)}")
-    await interaction.response.send_message("\n".join(lines))
+    await interaction.response.defer()
+    try:
+        lines = await asyncio.to_thread(news_service.feed_status)
+        counts = database.counts()
+        lines.append(f"Stored: {counts.get('posted', 0)} | Pending: {counts.get('pending', 0)}")
+    except Exception:
+        LOGGER.exception("Unable to collect bot status")
+        await interaction.followup.send("Unable to collect status right now.")
+        return
+    await interaction.followup.send("\n".join(lines))
 
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
-    scheduler.start()
+    try:
+        await bot.tree.sync()
+    except Exception:
+        LOGGER.exception("Unable to synchronize slash commands")
+    try:
+        scheduler.start()
+    except Exception:
+        LOGGER.exception("Unable to start news scheduler")
     LOGGER.info("CodexBot started as %s at %s", bot.user, ist_time())
 
 
