@@ -9,13 +9,13 @@ from discord import app_commands
 from discord.ext import commands
 
 try:
-    from .config import Config, FEEDS
+    from .config import Config, DEVOPS_FEEDS, FEEDS
     from .database import Database
     from .logging_config import configure_logging
     from .news import NewsService, format_date, ist_time, priority_news
     from .scheduler import NewsScheduler
 except ImportError:  # Supports `python app/bot.py` from the repository root.
-    from config import Config, FEEDS
+    from config import Config, DEVOPS_FEEDS, FEEDS
     from database import Database
     from logging_config import configure_logging
     from news import NewsService, format_date, ist_time, priority_news
@@ -27,13 +27,18 @@ LOGGER = logging.getLogger(__name__)
 config = Config.from_env()
 database = Database(config.database_path)
 database.initialize()
-news_service = NewsService(database, recent_news_hours=config.recent_news_hours)
+news_service = NewsService(
+    database,
+    recent_news_hours=config.recent_news_hours,
+    devops_feeds_enabled=config.devops_feeds_enabled,
+)
 
 TOKEN = config.token
 CHANNEL_ID = config.channel_id
 DB = config.database_path
 NEWS_INTERVAL = config.news_interval_minutes
 RECENT_NEWS_HOURS = config.recent_news_hours
+DEVOPS_FEEDS_ENABLED = config.devops_feeds_enabled
 
 
 def init_db() -> None:
@@ -123,6 +128,34 @@ async def sources(interaction: discord.Interaction):
     await interaction.response.send_message(
         "\n".join(f"📰 {name} - {data['category']}" for name, data in FEEDS.items())
     )
+
+
+@bot.tree.command(name="devops", description="Latest DevOps and Cloud news")
+async def devops(interaction: discord.Interaction):
+    await interaction.response.defer()
+    if not config.devops_feeds_enabled:
+        await interaction.followup.send("DevOps news feeds are currently disabled.")
+        return
+    try:
+        articles = await asyncio.to_thread(news_service.get_news, limit=10, devops_only=True)
+    except Exception:
+        LOGGER.exception("Unable to fetch DevOps news for slash command")
+        await interaction.followup.send("Unable to fetch DevOps news right now.")
+        return
+    if not articles:
+        await interaction.followup.send("No new DevOps or Cloud news found")
+        return
+    published = 0
+    for article in articles:
+        try:
+            await send_article(interaction.channel, article)
+        except Exception:
+            news_service.release(article)
+            LOGGER.exception("Unable to publish DevOps article %s", article["url"])
+        else:
+            news_service.mark_posted(article)
+            published += 1
+    await interaction.followup.send(f"Published {published} DevOps/Cloud article(s).", ephemeral=True)
 
 
 @bot.tree.command(name="health", description="Bot health")

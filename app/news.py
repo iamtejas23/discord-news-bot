@@ -14,10 +14,10 @@ from dateutil import parser
 import pytz
 
 try:
-    from .config import FEEDS, KEYWORDS
+    from .config import DEVOPS_FEEDS, FEEDS, KEYWORDS
     from .database import Database
 except ImportError:  # Supports `python app/bot.py` from the repository root.
-    from config import FEEDS, KEYWORDS
+    from config import DEVOPS_FEEDS, FEEDS, KEYWORDS
     from database import Database
 
 LOGGER = logging.getLogger(__name__)
@@ -122,12 +122,23 @@ def extract_image_url(item: Any, article_url: str) -> str | None:
 
 
 class NewsService:
-    def __init__(self, database: Database, recent_news_hours: int = 24):
+    def __init__(self, database: Database, recent_news_hours: int = 24, devops_feeds_enabled: bool = True):
         self.database = database
         self.recent_news_hours = recent_news_hours
+        self.devops_feeds_enabled = devops_feeds_enabled
 
-    def get_news(self, source: str | None = None, topic: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
-        feeds = FEEDS if not source or source == "All" else {source: FEEDS[source]}
+    def get_news(
+        self,
+        source: str | None = None,
+        topic: str | None = None,
+        limit: int = 10,
+        devops_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        if devops_only and not self.devops_feeds_enabled:
+            LOGGER.info("DevOps feeds are disabled; no DevOps articles fetched")
+            return []
+        feed_registry = DEVOPS_FEEDS if devops_only else FEEDS
+        feeds = feed_registry if not source or source == "All" else {source: feed_registry[source]}
         result = []
         for name, feed_config in feeds.items():
             try:
@@ -143,11 +154,11 @@ class NewsService:
                     continue
                 published_date = parse_published_date(item)
                 if published_date is None:
-                    LOGGER.info("Skipping article %s: missing date", url)
+                    LOGGER.info("Skipping %s article %s: missing date", "DevOps" if devops_only else "news", url)
                     continue
                 cutoff = datetime.now(timezone.utc) - timedelta(hours=self.recent_news_hours)
                 if published_date < cutoff:
-                    LOGGER.info("Skipping article %s: old article (%s)", url, published_date.isoformat())
+                    LOGGER.info("Skipping %s article %s: old article (%s)", "DevOps" if devops_only else "news", url, published_date.isoformat())
                     continue
                 title = clean_text(item.get("title", "No title"))
                 summary = clean_text(item.get("summary", ""))
@@ -166,8 +177,9 @@ class NewsService:
                 }
                 if self.database.claim(article):
                     result.append(article)
+                    LOGGER.info("Fetched DevOps article: %s", url) if devops_only else None
                 else:
-                    LOGGER.info("Skipping article %s: duplicate article", url)
+                    LOGGER.info("Skipping %s article %s: duplicate article", "DevOps" if devops_only else "news", url)
                 if len(result) >= limit:
                     return result
         return result

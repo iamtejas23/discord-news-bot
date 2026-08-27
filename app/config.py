@@ -15,6 +15,19 @@ FEEDS = {
     "Hacker News": {"url": "https://hnrss.org/frontpage", "category": "Technology"},
 }
 
+DEVOPS_FEEDS = {
+    "Kubernetes": {"url": "https://kubernetes.io/feed.xml", "category": "DevOps"},
+    "AWS Cloud": {"url": "https://aws.amazon.com/blogs/aws/feed/", "category": "Cloud"},
+    "Azure": {"url": "https://azure.microsoft.com/en-us/blog/feed/", "category": "Cloud"},
+    "GCP": {"url": "https://cloud.google.com/feeds/blog.xml", "category": "Cloud"},
+    "Terraform": {"url": "https://www.hashicorp.com/blog/products/terraform/feed.xml", "category": "DevOps"},
+    "Docker": {"url": "https://www.docker.com/blog/feed/", "category": "DevOps"},
+    "Linux": {"url": "https://www.linuxfoundation.org/blog/rss.xml", "category": "DevOps"},
+    "CI/CD": {"url": "https://github.blog/tag/ci-cd/feed/", "category": "DevOps"},
+    "DevSecOps": {"url": "https://owasp.org/feed.xml", "category": "DevSecOps"},
+    "Cloud Security": {"url": "https://aws.amazon.com/blogs/security/feed/", "category": "Cloud Security"},
+}
+
 KEYWORDS = ("aws", "eks", "kubernetes", "terraform", "security", "vulnerability", "hack", "cloud")
 
 
@@ -25,6 +38,7 @@ class Config:
     database_path: str = "/data/news.db"
     news_interval_minutes: int = 30
     recent_news_hours: int = 24
+    devops_feeds_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -48,4 +62,5 @@ class Config:
             database_path=os.getenv("NEWS_DATABASE_PATH", "/data/news.db"),
             news_interval_minutes=interval,
             recent_news_hours=recent_news_hours,
+            devops_feeds_enabled=os.getenv("DEVOPS_FEEDS_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
         )
