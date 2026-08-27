@@ -58,6 +58,8 @@ async def send_article(channel, article: dict) -> None:
     embed.add_field(name="📰 Source", value=article["source"])
     embed.add_field(name="📂 Category", value=article["category"])
     embed.add_field(name="📅 Published", value=format_date(article["published"]))
+    if article.get("image_url"):
+        embed.set_image(url=article["image_url"])
     embed.set_footer(text="CodexBot News")
     await channel.send(embed=embed)
 

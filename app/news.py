@@ -2,9 +2,12 @@
 
 from datetime import datetime, timezone
 import html
+from html.parser import HTMLParser
 import logging
 import re
 from typing import Any
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 import feedparser
 from dateutil import parser
@@ -39,6 +42,64 @@ def priority_news(title: str) -> bool:
     return any(keyword in title.lower() for keyword in KEYWORDS)
 
 
+class _OpenGraphParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.image_url = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "meta" or self.image_url:
+            return
+        attributes = {name.lower(): value for name, value in attrs}
+        if attributes.get("property", "").lower() == "og:image":
+            self.image_url = attributes.get("content")
+
+
+def _media_url(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("url") or value.get("href")
+    return getattr(value, "url", None) or getattr(value, "href", None)
+
+
+def _enclosure_image_url(item: Any) -> str | None:
+    enclosures = item.get("enclosures", [])
+    if isinstance(enclosures, dict):
+        enclosures = [enclosures]
+    for enclosure in enclosures:
+        image_url = _media_url(enclosure)
+        media_type = enclosure.get("type", "") if isinstance(enclosure, dict) else getattr(enclosure, "type", "")
+        if image_url and (media_type.startswith("image/") or not media_type):
+            return image_url
+    return None
+
+
+def extract_image_url(item: Any, article_url: str) -> str | None:
+    """Return the preferred feed image, falling back to the page's og:image."""
+    for field in ("media_content", "media_thumbnail"):
+        values = item.get(field, [])
+        if isinstance(values, dict):
+            values = [values]
+        for value in values:
+            image_url = _media_url(value)
+            if image_url:
+                return urljoin(article_url, image_url)
+
+    enclosure_url = _enclosure_image_url(item)
+    if enclosure_url:
+        return urljoin(article_url, enclosure_url)
+
+    try:
+        request = Request(article_url, headers={"User-Agent": "CodexBot/1.0"})
+        with urlopen(request, timeout=5) as response:
+            parser = _OpenGraphParser()
+            parser.feed(response.read(512 * 1024).decode(response.headers.get_content_charset() or "utf-8", "replace"))
+            if parser.image_url:
+                return urljoin(article_url, parser.image_url)
+    except Exception:
+        LOGGER.debug("Unable to extract og:image from %s", article_url, exc_info=True)
+    return None
+
+
 class NewsService:
     def __init__(self, database: Database):
         self.database = database
@@ -71,6 +132,7 @@ class NewsService:
                     "summary": summary,
                     "published": item.get("published", ""),
                     "category": feed_config["category"],
+                    "image_url": extract_image_url(item, url),
                 }
                 if self.database.claim(article):
                     result.append(article)
