@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timezone
 import logging
+import textwrap
 
 import discord
 from discord import app_commands
@@ -11,13 +12,13 @@ from discord.ext import commands
 try:
     from .config import Config, DEVOPS_FEEDS, FEEDS, TOPIC_FEEDS
     from .database import Database
-    from .logging_config import configure_logging, recent_logs
+    from .logging_config import configure_logging, recent_log_records
     from .news import NewsService, format_date, ist_time, priority_news
     from .scheduler import NewsScheduler
 except ImportError:  # Supports `python app/bot.py` from the repository root.
     from config import Config, DEVOPS_FEEDS, FEEDS, TOPIC_FEEDS
     from database import Database
-    from logging_config import configure_logging, recent_logs
+    from logging_config import configure_logging, recent_log_records
     from news import NewsService, format_date, ist_time, priority_news
     from scheduler import NewsScheduler
 
@@ -107,6 +108,23 @@ def matching_choices(values: list[str], current: str) -> list[app_commands.Choic
     current = current.lower()
     matches = [value for value in values if current in value.lower()]
     return [app_commands.Choice(name=value, value=value) for value in matches[:25]]
+
+
+def log_level_style(level: str) -> tuple[str, int]:
+    if level == "ERROR" or level == "CRITICAL":
+        return "Alert", 0xE74C3C
+    if level == "WARNING":
+        return "Warning", 0xF1C40F
+    if level == "DEBUG":
+        return "Debug", 0x95A5A6
+    return "Info", 0x2ECC71
+
+
+def compact_log_message(message: str, width: int = 220) -> str:
+    message = " ".join(message.split())
+    if not message:
+        return "_No message_"
+    return textwrap.shorten(message, width=width, placeholder="...")
 
 
 async def publish_command_articles(
@@ -384,14 +402,29 @@ async def health(interaction: discord.Interaction):
 
 @bot.tree.command(name="logs", description="Show the last 10 container application logs")
 async def logs(interaction: discord.Interaction):
-    lines = recent_logs(10)
-    if not lines:
+    records = recent_log_records(10)
+    if not records:
         await interaction.response.send_message("No logs captured yet.", ephemeral=True)
         return
-    output = "\n".join(lines)
-    if len(output) > 1900:
-        output = output[-1900:]
-    await interaction.response.send_message(f"```text\n{output}\n```", ephemeral=True)
+    highest_level = max(logging.getLevelName(record["level"]) for record in records)
+    status, color = log_level_style(logging.getLevelName(highest_level))
+    embed = discord.Embed(
+        title="Container Logs",
+        description=f"Last {len(records)} application log lines",
+        color=color,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.add_field(name="Limit", value="10 lines", inline=True)
+    embed.add_field(name="Visibility", value="Only you", inline=True)
+    for index, record in enumerate(records, start=1):
+        created = datetime.fromisoformat(record["created"]).astimezone(timezone.utc).strftime("%H:%M:%S UTC")
+        level_name = record["level"]
+        logger_name = record["logger"].rsplit(".", maxsplit=1)[-1]
+        name = f"{index}. {level_name} | {logger_name} | {created}"
+        embed.add_field(name=name, value=compact_log_message(record["message"]), inline=False)
+    embed.set_footer(text="CodexBot application log tail")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="status", description="Feed status")
