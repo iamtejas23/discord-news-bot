@@ -2,6 +2,18 @@
 
 The bot fetches RSS news, publishes Discord embeds, and stores delivery state in SQLite so an article is not posted twice. The existing deployment contract remains unchanged: run `python app/bot.py` or use Docker Compose.
 
+## Features
+
+- Scheduled RSS publishing to one Discord channel
+- Slash commands for on-demand news, DevOps news, cricket, geo-politics, space and astronomy, source lists, health, and feed status
+- Source, category, topic, and article-limit filters for on-demand commands
+- Discord autocomplete for source and category filters
+- SQLite duplicate protection with pending-claim retry handling
+- Recent-news filtering so old RSS entries are not reposted
+- Optional DevOps and Cloud feed set for Kubernetes, AWS, Azure, GCP, Terraform, Docker, Linux, CI/CD, DevSecOps, and cloud security
+- Dedicated topic feeds for cricket, geo-politics, and space/astronomy
+- Rich Discord embeds with source, category, publish time, priority markers, and feed images when available
+
 ## Configuration
 
 Required environment variables:
@@ -14,6 +26,8 @@ Optional variables:
 - `NEWS_DATABASE_PATH` (default: `/data/news.db`)
 - `NEWS_INTERVAL_MINUTES` (default: `30`)
 - `NEWS_RECENT_HOURS` (default: `24`)
+- `NEWS_PUBLISH_BATCH_SIZE` (default: `5`)
+- `NEWS_COMMAND_DEFAULT_LIMIT` (default: `10`)
 - `DEVOPS_FEEDS_ENABLED` (default: `true`)
 - `LOG_LEVEL` (default: `INFO`)
 
@@ -21,6 +35,40 @@ SQLite claims an article before delivery and marks it posted only after Discord 
 
 Only articles published within `NEWS_RECENT_HOURS` are eligible for posting. Entries without a valid published or updated date are skipped.
 
-Available slash commands are `/news`, `/status`, `/sources`, and `/health`.
+`NEWS_PUBLISH_BATCH_SIZE` controls how many articles the scheduler posts each interval. `NEWS_COMMAND_DEFAULT_LIMIT` controls how many articles on-demand news commands publish when no limit is provided. Slash command limits are clamped to 1-25 articles.
 
-`/devops` fetches current Kubernetes, AWS, Azure, GCP, Terraform, Docker, Linux, CI/CD, DevSecOps, and cloud security news. Set `DEVOPS_FEEDS_ENABLED=false` to disable those feeds without affecting the existing news sources.
+## Slash Commands
+
+- `/news` publishes general news. Optional filters: `topic`, `source`, `category`, and `limit`.
+- `/devops` publishes DevOps and Cloud news. Optional filters: `topic`, `source`, `category`, and `limit`.
+- `/cricket` publishes cricket news. Optional filters: `topic`, `source`, `category`, and `limit`.
+- `/geo-politics` publishes geo-politics and foreign-policy news. Optional filters: `topic`, `source`, `category`, and `limit`.
+- `/space` publishes space and astronomy news. Optional filters: `topic`, `source`, `category`, and `limit`.
+- `/sources` lists configured general, cricket, geo-politics, and space/astronomy sources. Set `include_devops` to include DevOps and Cloud sources.
+- `/status` shows scheduler settings, feed availability, and stored/pending article counts.
+- `/health` shows whether the bot is online, server count, and current IST time.
+
+`source` and `category` options support Discord autocomplete. Set `DEVOPS_FEEDS_ENABLED=false` to disable `/devops` without affecting the general news sources.
+
+## Docker Compose
+
+Create a `.env` file next to `docker-compose.yml`:
+
+```env
+DISCORD_TOKEN=your-discord-bot-token
+DISCORD_CHANNEL_ID=123456789012345678
+NEWS_INTERVAL_MINUTES=30
+NEWS_RECENT_HOURS=24
+NEWS_PUBLISH_BATCH_SIZE=5
+NEWS_COMMAND_DEFAULT_LIMIT=10
+DEVOPS_FEEDS_ENABLED=true
+LOG_LEVEL=INFO
+```
+
+Then start the bot:
+
+```bash
+docker compose up -d --build
+```
+
+The compose file mounts `./data` to `/data`; keep that folder between deploys so the SQLite database continues preventing duplicate posts.

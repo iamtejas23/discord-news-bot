@@ -14,10 +14,10 @@ from dateutil import parser
 import pytz
 
 try:
-    from .config import DEVOPS_FEEDS, FEEDS, KEYWORDS
+    from .config import DEVOPS_FEEDS, FEEDS, KEYWORDS, TOPIC_FEEDS
     from .database import Database
 except ImportError:  # Supports `python app/bot.py` from the repository root.
-    from config import DEVOPS_FEEDS, FEEDS, KEYWORDS
+    from config import DEVOPS_FEEDS, FEEDS, KEYWORDS, TOPIC_FEEDS
     from database import Database
 
 LOGGER = logging.getLogger(__name__)
@@ -121,25 +121,63 @@ def extract_image_url(item: Any, article_url: str) -> str | None:
     return None
 
 
+def resolve_source_name(registry: dict[str, dict[str, str]], source: str) -> str | None:
+    if source == "All":
+        return source
+    for name in registry:
+        if name.lower() == source.lower():
+            return name
+    return None
+
+
 class NewsService:
     def __init__(self, database: Database, recent_news_hours: int = 24, devops_feeds_enabled: bool = True):
         self.database = database
         self.recent_news_hours = recent_news_hours
         self.devops_feeds_enabled = devops_feeds_enabled
 
+    def feed_registry(self, devops_only: bool = False, feed_group: str | None = None) -> dict[str, dict[str, str]]:
+        if feed_group:
+            return TOPIC_FEEDS.get(feed_group, {})
+        return DEVOPS_FEEDS if devops_only else FEEDS
+
+    def sources(self, devops_only: bool = False, feed_group: str | None = None) -> list[str]:
+        registry = self.feed_registry(devops_only=devops_only, feed_group=feed_group)
+        return sorted(registry)
+
+    def categories(self, devops_only: bool = False, feed_group: str | None = None) -> list[str]:
+        registry = self.feed_registry(devops_only=devops_only, feed_group=feed_group)
+        return sorted({feed["category"] for feed in registry.values()})
+
     def get_news(
         self,
         source: str | None = None,
         topic: str | None = None,
+        category: str | None = None,
         limit: int = 10,
         devops_only: bool = False,
+        feed_group: str | None = None,
     ) -> list[dict[str, Any]]:
         if devops_only and not self.devops_feeds_enabled:
             LOGGER.info("DevOps feeds are disabled; no DevOps articles fetched")
             return []
-        feed_registry = DEVOPS_FEEDS if devops_only else FEEDS
-        feeds = feed_registry if not source or source == "All" else {source: feed_registry[source]}
+        feed_registry = self.feed_registry(devops_only=devops_only, feed_group=feed_group)
+        feed_label = feed_group or ("DevOps" if devops_only else "news")
+        if not feed_registry:
+            LOGGER.warning("Unknown feed group requested: %s", feed_group)
+            return []
+        if source and source != "All":
+            resolved_source = resolve_source_name(feed_registry, source)
+            if not resolved_source or resolved_source == "All":
+                LOGGER.warning("Unknown %s source requested: %s", feed_label, source)
+                return []
+            feeds = {resolved_source: feed_registry[resolved_source]}
+        else:
+            feeds = feed_registry
+        if category and category != "All":
+            feeds = {name: feed for name, feed in feeds.items() if feed["category"].lower() == category.lower()}
         result = []
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self.recent_news_hours)
         for name, feed_config in feeds.items():
             try:
                 feed = feedparser.parse(feed_config["url"])
@@ -154,11 +192,10 @@ class NewsService:
                     continue
                 published_date = parse_published_date(item)
                 if published_date is None:
-                    LOGGER.info("Skipping %s article %s: missing date", "DevOps" if devops_only else "news", url)
+                    LOGGER.info("Skipping %s article %s: missing date", feed_label, url)
                     continue
-                cutoff = datetime.now(timezone.utc) - timedelta(hours=self.recent_news_hours)
                 if published_date < cutoff:
-                    LOGGER.info("Skipping %s article %s: old article (%s)", "DevOps" if devops_only else "news", url, published_date.isoformat())
+                    LOGGER.info("Skipping %s article %s: old article (%s)", feed_label, url, published_date.isoformat())
                     continue
                 title = clean_text(item.get("title", "No title"))
                 summary = clean_text(item.get("summary", ""))
@@ -179,7 +216,7 @@ class NewsService:
                     result.append(article)
                     LOGGER.info("Fetched DevOps article: %s", url) if devops_only else None
                 else:
-                    LOGGER.info("Skipping %s article %s: duplicate article", "DevOps" if devops_only else "news", url)
+                    LOGGER.info("Skipping %s article %s: duplicate article", feed_label, url)
                 if len(result) >= limit:
                     return result
         return result
@@ -190,15 +227,26 @@ class NewsService:
     def release(self, article: dict[str, Any]) -> None:
         self.database.release(article["url"])
 
-    def feed_status(self) -> list[str]:
+    def feed_status(self, include_devops: bool = False, feed_groups: list[str] | None = None) -> list[str]:
+        registries = [("News", FEEDS)]
+        if include_devops and self.devops_feeds_enabled:
+            registries.append(("DevOps", DEVOPS_FEEDS))
+        for feed_group in feed_groups or []:
+            registry = TOPIC_FEEDS.get(feed_group)
+            if registry:
+                registries.append((feed_group, registry))
         lines = ["📡 Feed Status"]
-        for name, feed_config in FEEDS.items():
-            try:
-                feed = feedparser.parse(feed_config["url"])
-                lines.append(f"✅ {name}: {len(feed.entries)}")
-            except Exception:
-                LOGGER.exception("Unable to check feed %s", name)
-                lines.append(f"❌ {name}: unavailable")
+        for group, registry in registries:
+            lines.append(f"{group}:")
+            for name, feed_config in registry.items():
+                try:
+                    feed = feedparser.parse(feed_config["url"])
+                    lines.append(f"✅ {name}: {len(feed.entries)}")
+                except Exception:
+                    LOGGER.exception("Unable to check feed %s", name)
+                    lines.append(f"❌ {name}: unavailable")
+        if include_devops and not self.devops_feeds_enabled:
+            lines.append("DevOps: disabled")
         return lines
 
 
