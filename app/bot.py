@@ -11,13 +11,13 @@ from discord.ext import commands
 try:
     from .config import Config, DEVOPS_FEEDS, FEEDS, TOPIC_FEEDS
     from .database import Database
-    from .logging_config import configure_logging
+    from .logging_config import configure_logging, recent_logs
     from .news import NewsService, format_date, ist_time, priority_news
     from .scheduler import NewsScheduler
 except ImportError:  # Supports `python app/bot.py` from the repository root.
     from config import Config, DEVOPS_FEEDS, FEEDS, TOPIC_FEEDS
     from database import Database
-    from logging_config import configure_logging
+    from logging_config import configure_logging, recent_logs
     from news import NewsService, format_date, ist_time, priority_news
     from scheduler import NewsScheduler
 
@@ -380,6 +380,18 @@ async def health(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"🤖 CodexBot\n\nStatus: ONLINE\nServers: {len(bot.guilds)}\nTime: {ist_time()}"
     )
+
+
+@bot.tree.command(name="logs", description="Show the last 10 container application logs")
+async def logs(interaction: discord.Interaction):
+    lines = recent_logs(10)
+    if not lines:
+        await interaction.response.send_message("No logs captured yet.", ephemeral=True)
+        return
+    output = "\n".join(lines)
+    if len(output) > 1900:
+        output = output[-1900:]
+    await interaction.response.send_message(f"```text\n{output}\n```", ephemeral=True)
 
 
 @bot.tree.command(name="status", description="Feed status")
