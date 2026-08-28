@@ -5,14 +5,14 @@ The bot fetches RSS news, publishes Discord embeds, and stores delivery state in
 ## Features
 
 - Scheduled RSS publishing to one Discord channel
-- Slash commands for on-demand news, DevOps news, cricket, geo-politics, space and astronomy, source lists, health, logs, and feed status
+- Slash commands for on-demand news, stored article search, DevOps news, cricket, geo-politics, space and astronomy, source lists, health, logs, and feed status
 - Source, category, topic, and article-limit filters for on-demand commands
 - Discord autocomplete for source and category filters
 - SQLite duplicate protection with pending-claim retry handling
 - Recent-news filtering so old RSS entries are not reposted
 - Optional DevOps and Cloud feed set for Kubernetes, AWS, Azure, GCP, Terraform, Docker, Linux, CI/CD, DevSecOps, and cloud security
 - Dedicated topic feeds for cricket, geo-politics, and space/astronomy
-- Rich Discord embeds with source, category, publish time, priority markers, and feed images when available
+- Rich Discord embeds with source, category, publish time, priority markers, feed images when available, and action buttons
 
 ## Configuration
 
@@ -44,12 +44,13 @@ Only articles published within `NEWS_RECENT_HOURS` are eligible for posting. Ent
 - `/cricket` publishes cricket news. Optional filters: `topic`, `source`, `category`, and `limit`.
 - `/geo-politics` publishes geo-politics and foreign-policy news. Optional filters: `topic`, `source`, `category`, and `limit`.
 - `/space` publishes space and astronomy news. Optional filters: `topic`, `source`, `category`, and `limit`.
+- `/search-news` searches stored SQLite articles. Optional filters: `keyword`, `source`, `category`, and `limit`.
 - `/sources` lists configured general, cricket, geo-politics, and space/astronomy sources. Set `include_devops` to include DevOps and Cloud sources.
 - `/status` shows scheduler settings, feed availability, and stored/pending article counts.
 - `/health` shows whether the bot is online, server count, and current IST time.
-- `/logs` shows the last 10 captured application log lines from the running container. The response is ephemeral.
+- `/logs` shows the last 10 captured application log lines from the running container. Requires Manage Server permission and responds ephemerally.
 
-`source` and `category` options support Discord autocomplete. Set `DEVOPS_FEEDS_ENABLED=false` to disable `/devops` without affecting the general news sources.
+`source` and `category` options support Discord autocomplete. News embeds include `Read Article`, `More from Source`, and `Similar Topic` buttons. Set `DEVOPS_FEEDS_ENABLED=false` to disable `/devops` without affecting the general news sources.
 
 ## Docker Compose
 

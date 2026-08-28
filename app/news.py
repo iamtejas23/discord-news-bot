@@ -22,6 +22,8 @@ except ImportError:  # Supports `python app/bot.py` from the repository root.
 
 LOGGER = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
+FEED_TIMEOUT_SECONDS = 10
+USER_AGENT = "CodexBot/1.0"
 
 
 def clean_text(value: str | None) -> str:
@@ -110,7 +112,7 @@ def extract_image_url(item: Any, article_url: str) -> str | None:
         return urljoin(article_url, enclosure_url)
 
     try:
-        request = Request(article_url, headers={"User-Agent": "CodexBot/1.0"})
+        request = Request(article_url, headers={"User-Agent": USER_AGENT})
         with urlopen(request, timeout=5) as response:
             parser = _OpenGraphParser()
             parser.feed(response.read(512 * 1024).decode(response.headers.get_content_charset() or "utf-8", "replace"))
@@ -121,8 +123,14 @@ def extract_image_url(item: Any, article_url: str) -> str | None:
     return None
 
 
+def parse_feed(url: str):
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(request, timeout=FEED_TIMEOUT_SECONDS) as response:
+        return feedparser.parse(response.read())
+
+
 def resolve_source_name(registry: dict[str, dict[str, str]], source: str) -> str | None:
-    if source == "All":
+    if source.lower() == "all":
         return source
     for name in registry:
         if name.lower() == source.lower():
@@ -149,6 +157,18 @@ class NewsService:
         registry = self.feed_registry(devops_only=devops_only, feed_group=feed_group)
         return sorted({feed["category"] for feed in registry.values()})
 
+    def all_sources(self, include_devops: bool = True) -> list[str]:
+        registries = [FEEDS, *TOPIC_FEEDS.values()]
+        if include_devops and self.devops_feeds_enabled:
+            registries.append(DEVOPS_FEEDS)
+        return sorted({name for registry in registries for name in registry})
+
+    def all_categories(self, include_devops: bool = True) -> list[str]:
+        registries = [FEEDS, *TOPIC_FEEDS.values()]
+        if include_devops and self.devops_feeds_enabled:
+            registries.append(DEVOPS_FEEDS)
+        return sorted({feed["category"] for registry in registries for feed in registry.values()})
+
     def get_news(
         self,
         source: str | None = None,
@@ -166,21 +186,21 @@ class NewsService:
         if not feed_registry:
             LOGGER.warning("Unknown feed group requested: %s", feed_group)
             return []
-        if source and source != "All":
+        if source and source.lower() != "all":
             resolved_source = resolve_source_name(feed_registry, source)
-            if not resolved_source or resolved_source == "All":
+            if not resolved_source or resolved_source.lower() == "all":
                 LOGGER.warning("Unknown %s source requested: %s", feed_label, source)
                 return []
             feeds = {resolved_source: feed_registry[resolved_source]}
         else:
             feeds = feed_registry
-        if category and category != "All":
+        if category and category.lower() != "all":
             feeds = {name: feed for name, feed in feeds.items() if feed["category"].lower() == category.lower()}
         result = []
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self.recent_news_hours)
         for name, feed_config in feeds.items():
             try:
-                feed = feedparser.parse(feed_config["url"])
+                feed = parse_feed(feed_config["url"])
                 if getattr(feed, "bozo", False):
                     LOGGER.warning("Feed %s returned a parse warning: %s", name, feed.bozo_exception)
             except Exception:
@@ -211,6 +231,8 @@ class NewsService:
                     "published": item.get("published") or item.get("updated", ""),
                     "category": feed_config["category"],
                     "image_url": extract_image_url(item, url),
+                    "feed_group": feed_group,
+                    "devops_only": devops_only,
                 }
                 if self.database.claim(article):
                     result.append(article)
@@ -227,6 +249,15 @@ class NewsService:
     def release(self, article: dict[str, Any]) -> None:
         self.database.release(article["url"])
 
+    def search_articles(
+        self,
+        keyword: str | None = None,
+        source: str | None = None,
+        category: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        return self.database.search_articles(keyword=keyword, source=source, category=category, limit=limit)
+
     def feed_status(self, include_devops: bool = False, feed_groups: list[str] | None = None) -> list[str]:
         registries = [("News", FEEDS)]
         if include_devops and self.devops_feeds_enabled:
@@ -240,7 +271,7 @@ class NewsService:
             lines.append(f"{group}:")
             for name, feed_config in registry.items():
                 try:
-                    feed = feedparser.parse(feed_config["url"])
+                    feed = parse_feed(feed_config["url"])
                     lines.append(f"✅ {name}: {len(feed.entries)}")
                 except Exception:
                     LOGGER.exception("Unable to check feed %s", name)

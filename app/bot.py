@@ -70,7 +70,7 @@ async def send_article(channel, article: dict) -> None:
     if article.get("image_url"):
         embed.set_image(url=article["image_url"])
     embed.set_footer(text="CodexBot News")
-    await channel.send(embed=embed)
+    await channel.send(embed=embed, view=ArticleActionsView(article))
 
 
 async def publish_articles(channel, limit: int) -> int:
@@ -104,6 +104,10 @@ def requested_limit(limit: int | None) -> int:
     return min(max(limit or config.command_default_limit, 1), 25)
 
 
+def requested_search_limit(limit: int | None) -> int:
+    return min(max(limit or 10, 1), 10)
+
+
 def matching_choices(values: list[str], current: str) -> list[app_commands.Choice[str]]:
     current = current.lower()
     matches = [value for value in values if current in value.lower()]
@@ -127,6 +131,149 @@ def compact_log_message(message: str, width: int = 220) -> str:
     return textwrap.shorten(message, width=width, placeholder="...")
 
 
+def compact_article_text(value: str | None, width: int = 260) -> str:
+    value = " ".join((value or "").split())
+    if not value:
+        return "No summary available."
+    return textwrap.shorten(value, width=width, placeholder="...")
+
+
+def can_view_operational_data(interaction: discord.Interaction) -> bool:
+    if not isinstance(interaction.user, discord.Member):
+        return False
+    permissions = interaction.user.guild_permissions
+    return permissions.administrator or permissions.manage_guild
+
+
+def article_context(article: dict) -> tuple[bool, str | None]:
+    if article.get("feed_group") or article.get("devops_only"):
+        return bool(article.get("devops_only")), article.get("feed_group")
+    source = article.get("source")
+    category = article.get("category")
+    if source in FEEDS:
+        return False, None
+    for group, registry in TOPIC_FEEDS.items():
+        if source in registry or any(feed["category"] == category for feed in registry.values()):
+            return False, group
+    if source in DEVOPS_FEEDS or any(feed["category"] == category for feed in DEVOPS_FEEDS.values()):
+        return True, None
+    return False, None
+
+
+def search_result_embeds(articles: list[dict], keyword: str | None, source: str | None, category: str | None) -> list[discord.Embed]:
+    filters = []
+    if keyword:
+        filters.append(f"keyword: {keyword}")
+    if source and source != "All":
+        filters.append(f"source: {source}")
+    if category and category != "All":
+        filters.append(f"category: {category}")
+    footer = "Stored article match"
+    if filters:
+        footer += f" | {', '.join(filters)}"
+    embeds = []
+    for index, article in enumerate(articles, start=1):
+        title = compact_article_text(article.get("title"), width=120)
+        summary = compact_article_text(article.get("summary"), width=220)
+        published = format_date(article.get("published"))
+        embed = discord.Embed(
+            title=f"{index}. {title}",
+            url=article["url"],
+            description=summary,
+            color=0x3498DB,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Source", value=article["source"], inline=True)
+        embed.add_field(name="Category", value=article["category"], inline=True)
+        embed.add_field(name="Published", value=published, inline=True)
+        if article.get("image_url"):
+            embed.set_thumbnail(url=article["image_url"])
+        embed.set_footer(text=footer)
+        embeds.append(embed)
+    return embeds
+
+
+async def publish_filtered_articles(
+    channel,
+    *,
+    limit: int,
+    source: str | None = None,
+    topic: str | None = None,
+    category: str | None = None,
+    devops_only: bool = False,
+    feed_group: str | None = None,
+) -> int:
+    articles = await asyncio.to_thread(
+        news_service.get_news,
+        source=source,
+        topic=topic,
+        category=category,
+        limit=limit,
+        devops_only=devops_only,
+        feed_group=feed_group,
+    )
+    published = 0
+    for article in articles:
+        try:
+            await send_article(channel, article)
+        except Exception:
+            news_service.release(article)
+            LOGGER.exception("Unable to publish article %s", article["url"])
+        else:
+            news_service.mark_posted(article)
+            published += 1
+    return published
+
+
+class ArticleActionsView(discord.ui.View):
+    def __init__(self, article: dict):
+        super().__init__(timeout=900)
+        self.article = article
+        self.add_item(discord.ui.Button(label="Read Article", style=discord.ButtonStyle.link, url=article["url"]))
+        more_button = discord.ui.Button(label="More from Source", style=discord.ButtonStyle.secondary)
+        more_button.callback = self.more_from_source
+        self.add_item(more_button)
+        similar_button = discord.ui.Button(label="Similar Topic", style=discord.ButtonStyle.primary)
+        similar_button.callback = self.similar_topic
+        self.add_item(similar_button)
+
+    async def more_from_source(self, interaction: discord.Interaction):
+        if interaction.channel is None:
+            await interaction.response.send_message("This button needs a Discord channel.", ephemeral=True)
+            return
+        devops_only, feed_group = article_context(self.article)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        published = await publish_filtered_articles(
+            interaction.channel,
+            limit=3,
+            source=self.article.get("source"),
+            devops_only=devops_only,
+            feed_group=feed_group,
+        )
+        await interaction.followup.send(
+            f"Published {published} more article(s) from {self.article.get('source')}.",
+            ephemeral=True,
+        )
+
+    async def similar_topic(self, interaction: discord.Interaction):
+        if interaction.channel is None:
+            await interaction.response.send_message("This button needs a Discord channel.", ephemeral=True)
+            return
+        devops_only, feed_group = article_context(self.article)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        published = await publish_filtered_articles(
+            interaction.channel,
+            limit=3,
+            category=self.article.get("category"),
+            devops_only=devops_only,
+            feed_group=feed_group,
+        )
+        await interaction.followup.send(
+            f"Published {published} similar article(s) in {self.article.get('category')}.",
+            ephemeral=True,
+        )
+
+
 async def publish_command_articles(
     interaction: discord.Interaction,
     *,
@@ -141,8 +288,8 @@ async def publish_command_articles(
         await interaction.followup.send("This command needs to be used in a Discord channel.")
         return
     try:
-        articles = await asyncio.to_thread(
-            news_service.get_news,
+        published = await publish_filtered_articles(
+            interaction.channel,
             source=source,
             topic=topic,
             category=category,
@@ -154,19 +301,9 @@ async def publish_command_articles(
         LOGGER.exception("Unable to fetch %snews for slash command", "DevOps " if devops_only else "")
         await interaction.followup.send("Unable to fetch news right now.")
         return
-    if not articles:
+    if not published:
         await interaction.followup.send("No matching new articles found.")
         return
-    published = 0
-    for article in articles:
-        try:
-            await send_article(interaction.channel, article)
-        except Exception:
-            news_service.release(article)
-            LOGGER.exception("Unable to publish article %s", article["url"])
-        else:
-            news_service.mark_posted(article)
-            published += 1
     await interaction.followup.send(f"Published {published} article(s).", ephemeral=True)
 
 
@@ -393,6 +530,58 @@ async def space_category_autocomplete(
     return matching_choices(["All", *news_service.categories(feed_group="Space")], current)
 
 
+@bot.tree.command(name="search-news", description="Search stored news articles")
+@app_commands.describe(
+    keyword="Search text in stored article titles and summaries",
+    source="Only search this source",
+    category="Only search this category",
+    limit="Number of stored articles to show, from 1 to 10",
+)
+async def search_news(
+    interaction: discord.Interaction,
+    keyword: str | None = None,
+    source: str | None = None,
+    category: str | None = None,
+    limit: int | None = None,
+):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        articles = await asyncio.to_thread(
+            news_service.search_articles,
+            keyword=keyword,
+            source=source,
+            category=category,
+            limit=requested_search_limit(limit),
+        )
+    except Exception:
+        LOGGER.exception("Unable to search stored articles")
+        await interaction.followup.send("Unable to search stored articles right now.", ephemeral=True)
+        return
+    if not articles:
+        await interaction.followup.send("No stored articles matched your search.", ephemeral=True)
+        return
+    await interaction.followup.send(
+        embeds=search_result_embeds(articles, keyword, source, category),
+        ephemeral=True,
+    )
+
+
+@search_news.autocomplete("source")
+async def search_news_source_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    return matching_choices(["All", *news_service.all_sources()], current)
+
+
+@search_news.autocomplete("category")
+async def search_news_category_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    return matching_choices(["All", *news_service.all_categories()], current)
+
+
 @bot.tree.command(name="health", description="Bot health")
 async def health(interaction: discord.Interaction):
     await interaction.response.send_message(
@@ -401,7 +590,11 @@ async def health(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="logs", description="Show the last 10 container application logs")
+@app_commands.default_permissions(manage_guild=True)
 async def logs(interaction: discord.Interaction):
+    if not can_view_operational_data(interaction):
+        await interaction.response.send_message("You need Manage Server permission to view logs.", ephemeral=True)
+        return
     records = recent_log_records(10)
     if not records:
         await interaction.response.send_message("No logs captured yet.", ephemeral=True)
