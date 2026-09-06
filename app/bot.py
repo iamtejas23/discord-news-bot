@@ -14,13 +14,13 @@ try:
     from .database import Database
     from .logging_config import configure_logging, recent_log_records
     from .news import NewsService, format_date, ist_time, priority_news
-    from .scheduler import NewsScheduler
+    from .scheduler import DailyDigestScheduler, NewsScheduler
 except ImportError:  # Supports `python app/bot.py` from the repository root.
     from config import Config, DEVOPS_FEEDS, FEEDS, TOPIC_FEEDS
     from database import Database
     from logging_config import configure_logging, recent_log_records
     from news import NewsService, format_date, ist_time, priority_news
-    from scheduler import NewsScheduler
+    from scheduler import DailyDigestScheduler, NewsScheduler
 
 
 configure_logging()
@@ -35,6 +35,7 @@ news_service = NewsService(
     summary_length=config.summary_length,
     summary_min_sentences=config.summary_min_sentences,
     dedup_threshold=config.dedup_threshold,
+    breaking_keywords=config.breaking_keywords,
 )
 
 TOKEN = config.token
@@ -56,10 +57,11 @@ def get_news(source=None, topic=None, category=None, limit=10, feed_group=None):
 
 intents = discord.Intents.none()
 intents.guilds = True
+intents.reactions = True
 bot = commands.Bot(command_prefix=None, intents=intents, help_command=None)
 
 
-async def send_article(channel, article: dict) -> None:
+async def send_article(channel, article: dict) -> discord.Message:
     title = f"🚨 {article['title']}" if priority_news(article["title"]) else article["title"]
     summary = article.get("summary") or "No summary available."
     # If the summary is short (extractive), use it; otherwise keep original length check
@@ -76,11 +78,17 @@ async def send_article(channel, article: dict) -> None:
         embed.set_image(url=article["image_url"])
     embed.set_footer(text="CodexBot News")
     view = ArticleActionsView(article)
-    await channel.send(embed=embed, view=view)
+    message = await channel.send(embed=embed, view=view)
+    database.record_message(article["url"], message.id)
+    return message
 
 
 async def publish_articles(channel, limit: int) -> int:
-    articles = await asyncio.to_thread(news_service.get_news, limit=limit)
+    articles = await asyncio.to_thread(
+        news_service.get_news,
+        limit=limit,
+        exclude_priority=config.breaking_alerts_enabled,
+    )
     published = 0
     for article in articles:
         try:
@@ -94,16 +102,76 @@ async def publish_articles(channel, limit: int) -> int:
     return published
 
 
+async def publish_breaking_news() -> None:
+    channel = bot.get_channel(config.channel_id)
+    if channel is None:
+        LOGGER.error("Configured channel %s is not available for breaking alerts", config.channel_id)
+        return
+    articles = await asyncio.to_thread(news_service.get_news, limit=config.publish_batch_size, priority_only=True)
+    for article in articles:
+        try:
+            await send_article(channel, article)
+        except Exception:
+            news_service.release(article)
+            LOGGER.exception("Unable to publish breaking article %s", article["url"])
+        else:
+            news_service.mark_posted(article)
+
+
+async def publish_daily_digest() -> None:
+    channel = bot.get_channel(config.channel_id)
+    if channel is None:
+        LOGGER.error("Configured channel %s is not available for daily digest", config.channel_id)
+        return
+    articles = await asyncio.to_thread(
+        news_service.get_news,
+        limit=config.publish_batch_size,
+        exclude_priority=config.breaking_alerts_enabled,
+    )
+    if not articles:
+        LOGGER.info("No new articles available for daily digest")
+        return
+    embed = discord.Embed(
+        title="Daily News Digest",
+        description="Top stories from the latest feeds",
+        color=0x3498DB,
+        timestamp=datetime.now(timezone.utc),
+    )
+    for article in articles:
+        title = compact_article_text(article.get("title"), width=180)
+        summary = compact_article_text(article.get("summary"), width=500)
+        embed.add_field(
+            name=f"{article['source']} | {article['category']}",
+            value=f"**[{title}]({article['url']})**\n{summary}",
+            inline=False,
+        )
+    embed.set_footer(text="React with 👍 or 👎 to rate this digest")
+    try:
+        message = await channel.send(embed=embed)
+    except Exception:
+        for article in articles:
+            news_service.release(article)
+        raise
+    for article in articles:
+        database.record_message(article["url"], message.id)
+        news_service.mark_posted(article)
+
+
 async def publish_news() -> None:
     channel = bot.get_channel(config.channel_id)
     if channel is None:
         LOGGER.error("Configured channel %s is not available", config.channel_id)
         return
-    await publish_articles(channel, limit=config.publish_batch_size)
+    if config.digest_enabled:
+        await publish_daily_digest()
+    else:
+        await publish_articles(channel, limit=config.publish_batch_size)
 
 
 scheduler = NewsScheduler(publish_news, config.news_interval_minutes)
 news_loop = scheduler.loop
+breaking_scheduler = NewsScheduler(publish_breaking_news, config.breaking_interval_minutes)
+digest_scheduler = DailyDigestScheduler(publish_daily_digest, config.digest_hour_utc)
 
 
 def requested_limit(limit: int | None) -> int:
@@ -627,6 +695,31 @@ async def health(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="rankings", description="Show news preferences from reactions")
+async def rankings(interaction: discord.Interaction):
+    try:
+        data = await asyncio.to_thread(database.reaction_rankings, 10)
+    except Exception:
+        LOGGER.exception("Unable to load reaction rankings")
+        await interaction.response.send_message("Unable to load rankings right now.", ephemeral=True)
+        return
+    source_lines = [
+        f"{row['source']}: {row['emoji']} {row['votes']}"
+        for row in data["sources"]
+    ]
+    category_lines = [
+        f"{row['category']}: {row['emoji']} {row['votes']}"
+        for row in data["categories"]
+    ]
+    if not source_lines and not category_lines:
+        await interaction.response.send_message("No reactions have been recorded yet.", ephemeral=True)
+        return
+    embed = discord.Embed(title="News Preferences", color=0x2ECC71)
+    embed.add_field(name="Sources", value="\n".join(source_lines) or "No data", inline=False)
+    embed.add_field(name="Topics", value="\n".join(category_lines) or "No data", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="logs", description="Show the last 10 container application logs")
 @app_commands.default_permissions(manage_guild=True)
 async def logs(interaction: discord.Interaction):
@@ -688,10 +781,30 @@ async def on_ready():
     except Exception:
         LOGGER.exception("Unable to synchronize slash commands")
     try:
-        scheduler.start()
+        if config.digest_enabled:
+            digest_scheduler.start()
+        else:
+            scheduler.start()
+        if config.breaking_alerts_enabled:
+            breaking_scheduler.start()
     except Exception:
         LOGGER.exception("Unable to start news scheduler")
     LOGGER.info("CodexBot started as %s at %s", bot.user, ist_time())
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    emoji = str(payload.emoji)
+    if emoji not in {"👍", "👎"} or bot.user and payload.user_id == bot.user.id:
+        return
+    database.record_reaction(payload.message_id, payload.user_id, emoji)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    emoji = str(payload.emoji)
+    if emoji in {"👍", "👎"}:
+        database.remove_reaction(payload.message_id, payload.user_id)
 
 
 if __name__ == "__main__":

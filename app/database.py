@@ -40,7 +40,8 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'posted',
                     claimed_at TEXT,
                     posted_at TEXT,
-                    story_id TEXT
+                    story_id TEXT,
+                    message_id TEXT
                 )
                 """
             )
@@ -53,9 +54,23 @@ class Database:
                 ("feed_group", "TEXT"),
                 ("devops_only", "INTEGER NOT NULL DEFAULT 0"),
                 ("story_id", "TEXT"),
+                ("message_id", "TEXT"),
             ):
                 if column not in columns:
                     connection.execute(f"ALTER TABLE articles ADD COLUMN {column} {definition}")
+            connection.commit()
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS article_reactions (
+                    message_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    emoji TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    PRIMARY KEY (message_id, user_id)
+                )
+                """
+            )
             connection.commit()
 
     def _compute_story_id(self, article: dict[str, Any], existing_stories: list[dict[str, Any]], threshold: float = 0.6) -> str | None:
@@ -160,6 +175,59 @@ class Database:
             )
             connection.commit()
 
+    def record_message(self, url: str, message_id: int) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute("UPDATE articles SET message_id=? WHERE url=?", (str(message_id), url))
+            connection.commit()
+
+    def record_reaction(self, message_id: int, user_id: int, emoji: str) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO article_reactions (message_id, user_id, emoji, created) VALUES (?, ?, ?, ?)",
+                (str(message_id), str(user_id), emoji, datetime.now(timezone.utc).isoformat()),
+            )
+            connection.commit()
+
+    def remove_reaction(self, message_id: int, user_id: int) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "DELETE FROM article_reactions WHERE message_id=? AND user_id=?",
+                (str(message_id), str(user_id)),
+            )
+            connection.commit()
+
+    def reaction_rankings(self, limit: int = 10) -> dict[str, list[dict[str, Any]]]:
+        limit = min(max(limit, 1), 25)
+        with closing(self._connect()) as connection:
+            source_rows = connection.execute(
+                """
+                SELECT a.source, r.emoji, COUNT(*) AS votes
+                FROM article_reactions r
+                JOIN articles a ON a.message_id = r.message_id
+                WHERE r.emoji IN ('👍', '👎')
+                GROUP BY a.source, r.emoji
+                ORDER BY votes DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            category_rows = connection.execute(
+                """
+                SELECT a.category, r.emoji, COUNT(*) AS votes
+                FROM article_reactions r
+                JOIN articles a ON a.message_id = r.message_id
+                WHERE r.emoji IN ('👍', '👎')
+                GROUP BY a.category, r.emoji
+                ORDER BY votes DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return {
+            "sources": [dict(row) for row in source_rows if row["source"]],
+            "categories": [dict(row) for row in category_rows if row["category"]],
+        }
+
     def release(self, url: str) -> None:
         with closing(self._connect()) as connection:
             connection.execute("DELETE FROM articles WHERE url=? AND status='pending'", (url,))
@@ -196,7 +264,7 @@ class Database:
             rows = connection.execute(
                 f"""
                 SELECT url, source, title, summary, published, category, image_url, feed_group,
-                       devops_only, created, status, posted_at, story_id
+                       devops_only, created, status, posted_at, story_id, message_id
                 FROM articles
                 {where}
                 ORDER BY COALESCE(posted_at, claimed_at, created) DESC

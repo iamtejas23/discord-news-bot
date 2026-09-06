@@ -56,6 +56,7 @@ TOPIC_FEEDS = {
 }
 
 KEYWORDS = ("aws", "eks", "kubernetes", "terraform", "security", "vulnerability", "hack", "cloud")
+BREAKING_KEYWORDS = ("breaking", "urgent", "alert", "emergency", "outage", "attack", "earthquake", "war")
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,11 @@ class Config:
     summary_min_sentences: int = 2
     dedup_threshold: float = 0.6
     dedup_lookback_hours: int = 168
+    digest_enabled: bool = False
+    digest_hour_utc: int = 8
+    breaking_alerts_enabled: bool = True
+    breaking_interval_minutes: int = 5
+    breaking_keywords: tuple[str, ...] = BREAKING_KEYWORDS
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -89,10 +95,13 @@ class Config:
             summary_min_sentences = int(os.getenv("NEWS_SUMMARY_MIN_SENTENCES", "2"))
             dedup_threshold = float(os.getenv("NEWS_DEDUP_THRESHOLD", "0.6"))
             dedup_lookback_hours = int(os.getenv("NEWS_DEDUP_LOOKBACK_HOURS", "168"))
+            digest_hour_utc = int(os.getenv("NEWS_DIGEST_HOUR_UTC", "8"))
+            breaking_interval_minutes = int(os.getenv("NEWS_BREAKING_INTERVAL_MINUTES", "5"))
         except ValueError as exc:
             raise RuntimeError(
                 "DISCORD_CHANNEL_ID, NEWS_INTERVAL_MINUTES, NEWS_RECENT_HOURS, "
-                "NEWS_PUBLISH_BATCH_SIZE, and NEWS_COMMAND_DEFAULT_LIMIT must be integers"
+                "NEWS_PUBLISH_BATCH_SIZE, NEWS_COMMAND_DEFAULT_LIMIT, NEWS_DIGEST_HOUR_UTC, "
+                "and NEWS_BREAKING_INTERVAL_MINUTES must be integers"
             ) from exc
         if interval < 1 or recent_news_hours < 1 or publish_batch_size < 1 or command_default_limit < 1:
             raise RuntimeError(
@@ -107,6 +116,15 @@ class Config:
             dedup_threshold = 0.6
         if dedup_lookback_hours < 1:
             dedup_lookback_hours = 168
+        if not 0 <= digest_hour_utc <= 23:
+            digest_hour_utc = 8
+        if breaking_interval_minutes < 1:
+            breaking_interval_minutes = 5
+        breaking_keywords = tuple(
+            keyword.strip().lower()
+            for keyword in os.getenv("NEWS_BREAKING_KEYWORDS", ",".join(BREAKING_KEYWORDS)).split(",")
+            if keyword.strip()
+        ) or BREAKING_KEYWORDS
         return cls(
             token=token,
             channel_id=parsed_channel_id,
@@ -120,4 +138,9 @@ class Config:
             summary_min_sentences=summary_min_sentences,
             dedup_threshold=dedup_threshold,
             dedup_lookback_hours=dedup_lookback_hours,
+            digest_enabled=os.getenv("NEWS_DIGEST_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+            digest_hour_utc=digest_hour_utc,
+            breaking_alerts_enabled=os.getenv("NEWS_BREAKING_ALERTS_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+            breaking_interval_minutes=breaking_interval_minutes,
+            breaking_keywords=breaking_keywords,
         )

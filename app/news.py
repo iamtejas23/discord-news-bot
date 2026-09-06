@@ -15,10 +15,10 @@ from dateutil import parser
 import pytz
 
 try:
-    from .config import DEVOPS_FEEDS, FEEDS, KEYWORDS, TOPIC_FEEDS
+    from .config import BREAKING_KEYWORDS, DEVOPS_FEEDS, FEEDS, KEYWORDS, TOPIC_FEEDS
     from .database import Database
 except ImportError:  # Supports `python app/bot.py` from the repository root.
-    from config import DEVOPS_FEEDS, FEEDS, KEYWORDS, TOPIC_FEEDS
+    from config import BREAKING_KEYWORDS, DEVOPS_FEEDS, FEEDS, KEYWORDS, TOPIC_FEEDS
     from database import Database
 
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +43,11 @@ def format_date(value: str | None) -> str:
 
 def priority_news(title: str) -> bool:
     return any(keyword in title.lower() for keyword in KEYWORDS)
+
+
+def breaking_news(title: str, keywords: tuple[str, ...] = BREAKING_KEYWORDS) -> bool:
+    title_lower = title.lower()
+    return any(keyword in title_lower for keyword in keywords)
 
 
 def parse_published_date(item: Any) -> datetime | None:
@@ -142,11 +147,13 @@ def resolve_source_name(registry: dict[str, dict[str, str]], source: str) -> str
 class NewsService:
     def __init__(self, database: Database, recent_news_hours: int = 24, devops_feeds_enabled: bool = True,
                  summary_length: int = 3, summary_min_sentences: int = 2,
-                 dedup_threshold: float = 0.6):
+                 dedup_threshold: float = 0.6,
+                 breaking_keywords: tuple[str, ...] = BREAKING_KEYWORDS):
         self.database = database
         self.recent_news_hours = recent_news_hours
         self.devops_feeds_enabled = devops_feeds_enabled
         self.dedup_threshold = dedup_threshold
+        self.breaking_keywords = breaking_keywords
         self.summarizer = ExtractiveSummarizer(
             recent_news_hours=recent_news_hours,
             summary_length=summary_length,
@@ -186,6 +193,8 @@ class NewsService:
         limit: int = 10,
         devops_only: bool = False,
         feed_group: str | None = None,
+        priority_only: bool = False,
+        exclude_priority: bool = False,
     ) -> list[dict[str, Any]]:
         if devops_only and not self.devops_feeds_enabled:
             LOGGER.info("DevOps feeds are disabled; no DevOps articles fetched")
@@ -229,6 +238,11 @@ class NewsService:
                 title = clean_text(item.get("title", "No title"))
                 summary = clean_text(item.get("summary", ""))
                 if topic and topic.lower() not in f"{title} {summary}".lower():
+                    continue
+                is_breaking = breaking_news(title, self.breaking_keywords)
+                if priority_only and not is_breaking:
+                    continue
+                if exclude_priority and is_breaking:
                     continue
                 if len(summary) > 800:
                     summary = summary[:800] + "..."

@@ -13,6 +13,9 @@ The bot fetches RSS news, publishes Discord embeds, and stores delivery state in
 - Optional DevOps and Cloud feed set for Kubernetes, AWS, Azure, GCP, Terraform, Docker, Linux, CI/CD, DevSecOps, and cloud security
 - Dedicated topic feeds for cricket, geo-politics, and space/astronomy
 - Rich Discord embeds with source, category, publish time, priority markers, feed images when available, and action buttons
+- Optional daily digest mode that posts one summary embed with the top stories
+- Optional breaking-news alert loop for configured urgent keywords
+- Reaction-based source and topic preference rankings using 👍 and 👎 feedback
 
 ## Configuration
 
@@ -30,6 +33,11 @@ Optional variables:
 - `NEWS_COMMAND_DEFAULT_LIMIT` (default: `10`)
 - `DEVOPS_FEEDS_ENABLED` (default: `true`)
 - `LOG_LEVEL` (default: `INFO`)
+- `NEWS_DIGEST_ENABLED` (default: `false`)
+- `NEWS_DIGEST_HOUR_UTC` (default: `8`)
+- `NEWS_BREAKING_ALERTS_ENABLED` (default: `true`)
+- `NEWS_BREAKING_INTERVAL_MINUTES` (default: `5`)
+- `NEWS_BREAKING_KEYWORDS` (default: `breaking,urgent,alert,emergency,outage,attack,earthquake,war`)
 
 SQLite claims an article before delivery and marks it posted only after Discord accepts the message. Failed sends are released for retry, and abandoned claims expire after one hour. Keep the `/data` volume when deploying so duplicate protection survives restarts.
 
@@ -49,8 +57,11 @@ Only articles published within `NEWS_RECENT_HOURS` are eligible for posting. Ent
 - `/status` shows scheduler settings, feed availability, and stored/pending article counts.
 - `/health` shows whether the bot is online, server count, and current IST time.
 - `/logs` shows the last 10 captured application log lines from the running container. Requires Manage Server permission and responds ephemerally.
+- `/rankings` shows source and topic preferences calculated from stored 👍 and 👎 reactions.
 
 `source` and `category` options support Discord autocomplete. News embeds include `Read Article`, `More from Source`, and `Similar Topic` buttons. Set `DEVOPS_FEEDS_ENABLED=false` to disable `/devops` without affecting the general news sources.
+
+When `NEWS_DIGEST_ENABLED=true`, the regular interval scheduler is replaced by one daily digest at `NEWS_DIGEST_HOUR_UTC`. Breaking alerts continue on their own interval when enabled. Reacting to an individual article, or to a digest containing several articles, records one preference vote per user and message.
 
 ## Docker Compose
 
@@ -64,6 +75,10 @@ NEWS_RECENT_HOURS=24
 NEWS_PUBLISH_BATCH_SIZE=5
 NEWS_COMMAND_DEFAULT_LIMIT=10
 DEVOPS_FEEDS_ENABLED=true
+NEWS_DIGEST_ENABLED=false
+NEWS_DIGEST_HOUR_UTC=8
+NEWS_BREAKING_ALERTS_ENABLED=true
+NEWS_BREAKING_INTERVAL_MINUTES=5
 LOG_LEVEL=INFO
 ```
 
