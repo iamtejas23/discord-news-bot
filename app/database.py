@@ -1,7 +1,7 @@
 """SQLite persistence for article delivery state."""
 
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import re
 import sqlite3
@@ -71,6 +71,44 @@ class Database:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS url_fingerprints (
+                    url TEXT PRIMARY KEY,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS preference_events (
+                    message_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    emoji TEXT NOT NULL,
+                    created TEXT NOT NULL,
+                    PRIMARY KEY (message_id, user_id, source, category)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO url_fingerprints (url, first_seen, last_seen)
+                SELECT url, created, COALESCE(posted_at, created) FROM articles
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO preference_events
+                    (message_id, user_id, source, category, emoji, created)
+                SELECT r.message_id, r.user_id, a.source, a.category, r.emoji, r.created
+                FROM article_reactions r
+                JOIN articles a ON a.message_id = r.message_id
+                WHERE r.emoji IN ('👍', '👎')
+                """
+            )
             connection.commit()
 
     def _compute_story_id(self, article: dict[str, Any], existing_stories: list[dict[str, Any]], threshold: float = 0.6) -> str | None:
@@ -112,6 +150,14 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         stale_before = (datetime.now(timezone.utc).timestamp() - 3600)
         with closing(self._connect()) as connection:
+            fingerprint = connection.execute(
+                "SELECT url FROM url_fingerprints WHERE url=?", (article["url"],)
+            ).fetchone()
+            existing_article = connection.execute(
+                "SELECT status, claimed_at FROM articles WHERE url=?", (article["url"],)
+            ).fetchone()
+            if fingerprint and existing_article is None:
+                return False
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO articles
@@ -123,10 +169,13 @@ class Database:
                  article.get("published", ""), article["category"], article.get("image_url"),
                  article.get("feed_group"), int(bool(article.get("devops_only"))), now, now, None),
             )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    "INSERT OR IGNORE INTO url_fingerprints (url, first_seen, last_seen) VALUES (?, ?, ?)",
+                    (article["url"], now, now),
+                )
             if cursor.rowcount == 0:
-                existing = connection.execute(
-                    "SELECT status, claimed_at FROM articles WHERE url=?", (article["url"],)
-                ).fetchone()
+                existing = existing_article
                 claimed = False
                 if existing and existing["status"] == "pending" and existing["claimed_at"]:
                     try:
@@ -182,9 +231,20 @@ class Database:
 
     def record_reaction(self, message_id: int, user_id: int, emoji: str) -> None:
         with closing(self._connect()) as connection:
+            created = datetime.now(timezone.utc).isoformat()
             connection.execute(
                 "INSERT OR REPLACE INTO article_reactions (message_id, user_id, emoji, created) VALUES (?, ?, ?, ?)",
-                (str(message_id), str(user_id), emoji, datetime.now(timezone.utc).isoformat()),
+                (str(message_id), str(user_id), emoji, created),
+            )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO preference_events
+                    (message_id, user_id, source, category, emoji, created)
+                SELECT ?, ?, source, category, ?, ?
+                FROM articles
+                WHERE message_id=?
+                """,
+                (str(message_id), str(user_id), emoji, created, str(message_id)),
             )
             connection.commit()
 
@@ -194,6 +254,10 @@ class Database:
                 "DELETE FROM article_reactions WHERE message_id=? AND user_id=?",
                 (str(message_id), str(user_id)),
             )
+            connection.execute(
+                "DELETE FROM preference_events WHERE message_id=? AND user_id=?",
+                (str(message_id), str(user_id)),
+            )
             connection.commit()
 
     def reaction_rankings(self, limit: int = 10) -> dict[str, list[dict[str, Any]]]:
@@ -201,11 +265,10 @@ class Database:
         with closing(self._connect()) as connection:
             source_rows = connection.execute(
                 """
-                SELECT a.source, r.emoji, COUNT(*) AS votes
-                FROM article_reactions r
-                JOIN articles a ON a.message_id = r.message_id
-                WHERE r.emoji IN ('👍', '👎')
-                GROUP BY a.source, r.emoji
+                SELECT source, emoji, COUNT(*) AS votes
+                FROM preference_events
+                WHERE emoji IN ('👍', '👎')
+                GROUP BY source, emoji
                 ORDER BY votes DESC
                 LIMIT ?
                 """,
@@ -213,11 +276,10 @@ class Database:
             ).fetchall()
             category_rows = connection.execute(
                 """
-                SELECT a.category, r.emoji, COUNT(*) AS votes
-                FROM article_reactions r
-                JOIN articles a ON a.message_id = r.message_id
-                WHERE r.emoji IN ('👍', '👎')
-                GROUP BY a.category, r.emoji
+                SELECT category, emoji, COUNT(*) AS votes
+                FROM preference_events
+                WHERE emoji IN ('👍', '👎')
+                GROUP BY category, emoji
                 ORDER BY votes DESC
                 LIMIT ?
                 """,
@@ -227,6 +289,36 @@ class Database:
             "sources": [dict(row) for row in source_rows if row["source"]],
             "categories": [dict(row) for row in category_rows if row["category"]],
         }
+
+    def cleanup_retention(self, article_days: int = 7, preference_days: int = 90) -> dict[str, int]:
+        """Remove old article details while retaining compact preference history."""
+        now = datetime.now(timezone.utc)
+        article_cutoff = (now - timedelta(days=article_days)).isoformat()
+        preference_cutoff = (now - timedelta(days=preference_days)).isoformat()
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO preference_events
+                    (message_id, user_id, source, category, emoji, created)
+                SELECT r.message_id, r.user_id, a.source, a.category, r.emoji, r.created
+                FROM article_reactions r
+                JOIN articles a ON a.message_id = r.message_id
+                WHERE r.emoji IN ('👍', '👎')
+                """
+            )
+            preferences_deleted = connection.execute(
+                "DELETE FROM preference_events WHERE created < ?", (preference_cutoff,)
+            ).rowcount
+            connection.execute("DELETE FROM article_reactions WHERE created < ?", (preference_cutoff,))
+            articles_deleted = connection.execute(
+                """
+                DELETE FROM articles
+                WHERE status='posted' AND COALESCE(posted_at, created) < ?
+                """,
+                (article_cutoff,),
+            ).rowcount
+            connection.commit()
+        return {"articles": articles_deleted, "preferences": preferences_deleted}
 
     def release(self, url: str) -> None:
         with closing(self._connect()) as connection:

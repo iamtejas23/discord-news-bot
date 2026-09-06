@@ -78,6 +78,8 @@ class Config:
     breaking_alerts_enabled: bool = True
     breaking_interval_minutes: int = 5
     breaking_keywords: tuple[str, ...] = BREAKING_KEYWORDS
+    article_retention_days: int = 7
+    preference_retention_days: int = 90
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -97,11 +99,14 @@ class Config:
             dedup_lookback_hours = int(os.getenv("NEWS_DEDUP_LOOKBACK_HOURS", "168"))
             digest_hour_utc = int(os.getenv("NEWS_DIGEST_HOUR_UTC", "8"))
             breaking_interval_minutes = int(os.getenv("NEWS_BREAKING_INTERVAL_MINUTES", "5"))
+            article_retention_days = int(os.getenv("NEWS_ARTICLE_RETENTION_DAYS", "7"))
+            preference_retention_days = int(os.getenv("NEWS_PREFERENCE_RETENTION_DAYS", "90"))
         except ValueError as exc:
             raise RuntimeError(
                 "DISCORD_CHANNEL_ID, NEWS_INTERVAL_MINUTES, NEWS_RECENT_HOURS, "
                 "NEWS_PUBLISH_BATCH_SIZE, NEWS_COMMAND_DEFAULT_LIMIT, NEWS_DIGEST_HOUR_UTC, "
-                "and NEWS_BREAKING_INTERVAL_MINUTES must be integers"
+                "NEWS_BREAKING_INTERVAL_MINUTES, NEWS_ARTICLE_RETENTION_DAYS, and "
+                "NEWS_PREFERENCE_RETENTION_DAYS must be integers"
             ) from exc
         if interval < 1 or recent_news_hours < 1 or publish_batch_size < 1 or command_default_limit < 1:
             raise RuntimeError(
@@ -120,6 +125,10 @@ class Config:
             digest_hour_utc = 8
         if breaking_interval_minutes < 1:
             breaking_interval_minutes = 5
+        if article_retention_days < 1:
+            article_retention_days = 7
+        if preference_retention_days < 1:
+            preference_retention_days = 90
         breaking_keywords = tuple(
             keyword.strip().lower()
             for keyword in os.getenv("NEWS_BREAKING_KEYWORDS", ",".join(BREAKING_KEYWORDS)).split(",")
@@ -143,4 +152,6 @@ class Config:
             breaking_alerts_enabled=os.getenv("NEWS_BREAKING_ALERTS_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
             breaking_interval_minutes=breaking_interval_minutes,
             breaking_keywords=breaking_keywords,
+            article_retention_days=article_retention_days,
+            preference_retention_days=preference_retention_days,
         )

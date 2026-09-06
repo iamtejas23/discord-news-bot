@@ -38,8 +38,12 @@ Optional variables:
 - `NEWS_BREAKING_ALERTS_ENABLED` (default: `true`)
 - `NEWS_BREAKING_INTERVAL_MINUTES` (default: `5`)
 - `NEWS_BREAKING_KEYWORDS` (default: `breaking,urgent,alert,emergency,outage,attack,earthquake,war`)
+- `NEWS_ARTICLE_RETENTION_DAYS` (default: `7`)
+- `NEWS_PREFERENCE_RETENTION_DAYS` (default: `90`)
 
 SQLite claims an article before delivery and marks it posted only after Discord accepts the message. Failed sends are released for retry, and abandoned claims expire after one hour. Keep the `/data` volume when deploying so duplicate protection survives restarts.
+
+Posted article details are automatically deleted after `NEWS_ARTICLE_RETENTION_DAYS`. Reaction preference events retain only compact source/category feedback for `NEWS_PREFERENCE_RETENTION_DAYS`, so `/rankings` continues working after article cleanup. URL fingerprints are retained separately to prevent an old RSS item from being reposted after its article details are deleted.
 
 Only articles published within `NEWS_RECENT_HOURS` are eligible for posting. Entries without a valid published or updated date are skipped.
 
@@ -79,6 +83,8 @@ NEWS_DIGEST_ENABLED=false
 NEWS_DIGEST_HOUR_UTC=8
 NEWS_BREAKING_ALERTS_ENABLED=true
 NEWS_BREAKING_INTERVAL_MINUTES=5
+NEWS_ARTICLE_RETENTION_DAYS=7
+NEWS_PREFERENCE_RETENTION_DAYS=90
 LOG_LEVEL=INFO
 ```
 

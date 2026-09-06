@@ -28,6 +28,25 @@ LOGGER = logging.getLogger(__name__)
 config = Config.from_env()
 database = Database(config.database_path)
 database.initialize()
+
+
+def cleanup_retention() -> None:
+    try:
+        result = database.cleanup_retention(
+            article_days=config.article_retention_days,
+            preference_days=config.preference_retention_days,
+        )
+        if result["articles"] or result["preferences"]:
+            LOGGER.info(
+                "Retention cleanup removed %d articles and %d preference events",
+                result["articles"],
+                result["preferences"],
+            )
+    except Exception:
+        LOGGER.exception("Unable to complete retention cleanup")
+
+
+cleanup_retention()
 news_service = NewsService(
     database,
     recent_news_hours=config.recent_news_hours,
@@ -80,7 +99,16 @@ async def send_article(channel, article: dict) -> discord.Message:
     view = ArticleActionsView(article)
     message = await channel.send(embed=embed, view=view)
     database.record_message(article["url"], message.id)
+    await add_feedback_reactions(message)
     return message
+
+
+async def add_feedback_reactions(message: discord.Message) -> None:
+    for emoji in ("👍", "👎"):
+        try:
+            await message.add_reaction(emoji)
+        except discord.HTTPException:
+            LOGGER.warning("Unable to add %s reaction to message %s", emoji, message.id)
 
 
 async def publish_articles(channel, limit: int) -> int:
@@ -152,12 +180,14 @@ async def publish_daily_digest() -> None:
         for article in articles:
             news_service.release(article)
         raise
+    await add_feedback_reactions(message)
     for article in articles:
         database.record_message(article["url"], message.id)
         news_service.mark_posted(article)
 
 
 async def publish_news() -> None:
+    await asyncio.to_thread(cleanup_retention)
     channel = bot.get_channel(config.channel_id)
     if channel is None:
         LOGGER.error("Configured channel %s is not available", config.channel_id)
