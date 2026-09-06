@@ -32,6 +32,9 @@ news_service = NewsService(
     database,
     recent_news_hours=config.recent_news_hours,
     devops_feeds_enabled=config.devops_feeds_enabled,
+    summary_length=config.summary_length,
+    summary_min_sentences=config.summary_min_sentences,
+    dedup_threshold=config.dedup_threshold,
 )
 
 TOKEN = config.token
@@ -58,10 +61,12 @@ bot = commands.Bot(command_prefix=None, intents=intents, help_command=None)
 
 async def send_article(channel, article: dict) -> None:
     title = f"🚨 {article['title']}" if priority_news(article["title"]) else article["title"]
+    summary = article.get("summary") or "No summary available."
+    # If the summary is short (extractive), use it; otherwise keep original length check
     embed = discord.Embed(
         title=title,
         url=article["url"],
-        description=article["summary"],
+        description=summary,
         timestamp=datetime.now(timezone.utc),
     )
     embed.add_field(name="📰 Source", value=article["source"])
@@ -70,7 +75,8 @@ async def send_article(channel, article: dict) -> None:
     if article.get("image_url"):
         embed.set_image(url=article["image_url"])
     embed.set_footer(text="CodexBot News")
-    await channel.send(embed=embed, view=ArticleActionsView(article))
+    view = ArticleActionsView(article)
+    await channel.send(embed=embed, view=view)
 
 
 async def publish_articles(channel, limit: int) -> int:
@@ -236,6 +242,38 @@ class ArticleActionsView(discord.ui.View):
         similar_button = discord.ui.Button(label="Similar Topic", style=discord.ButtonStyle.primary)
         similar_button.callback = self.similar_topic
         self.add_item(similar_button)
+        if article.get("story_id"):
+            story_button = discord.ui.Button(label="View Story", style=discord.ButtonStyle.success)
+            story_button.callback = self.view_story
+            self.add_item(story_button)
+
+    async def view_story(self, interaction: discord.Interaction):
+        if interaction.channel is None:
+            await interaction.response.send_message("This button needs a Discord channel.", ephemeral=True)
+            return
+        story_id = self.article.get("story_id")
+        rows = database._connect().execute(
+            "SELECT source, title, summary FROM articles WHERE story_id=? AND status='posted' ORDER BY COALESCE(posted_at, claimed_at, created) DESC",
+            (story_id,),
+        ).fetchall()
+        sources = list({row["source"] for row in rows})
+        canonical_title = rows[0]["title"] if rows else "Untitled story"
+        combined_summary = " ".join([row["summary"] or "" for row in rows])
+        article_count = len(rows)
+        await interaction.response.send_message(
+            f"📖 **Story: {canonical_title}**\n"
+            f"> {combined_summary[:300]}...\n"
+            f"> Sources: {', '.join(sources) if sources else 'Unknown'}\n"
+            f"> Articles in story: {article_count}",
+            ephemeral=True,
+        )
+
+    async def _get_related_story_articles(self, story_id: str) -> list[dict]:
+        rows = database._connect().execute(
+            "SELECT url, source, title, summary, published, category FROM articles WHERE story_id=? AND status='posted' ORDER BY COALESCE(posted_at, claimed_at, created) DESC",
+            (story_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     async def more_from_source(self, interaction: discord.Interaction):
         if interaction.channel is None:

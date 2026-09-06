@@ -68,6 +68,10 @@ class Config:
     publish_batch_size: int = 5
     command_default_limit: int = 10
     devops_feeds_enabled: bool = True
+    summary_length: int = 3
+    summary_min_sentences: int = 2
+    dedup_threshold: float = 0.6
+    dedup_lookback_hours: int = 168
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -81,6 +85,10 @@ class Config:
             recent_news_hours = int(os.getenv("NEWS_RECENT_HOURS", "24"))
             publish_batch_size = int(os.getenv("NEWS_PUBLISH_BATCH_SIZE", "5"))
             command_default_limit = int(os.getenv("NEWS_COMMAND_DEFAULT_LIMIT", "10"))
+            summary_length = int(os.getenv("NEWS_SUMMARY_LENGTH", "3"))
+            summary_min_sentences = int(os.getenv("NEWS_SUMMARY_MIN_SENTENCES", "2"))
+            dedup_threshold = float(os.getenv("NEWS_DEDUP_THRESHOLD", "0.6"))
+            dedup_lookback_hours = int(os.getenv("NEWS_DEDUP_LOOKBACK_HOURS", "168"))
         except ValueError as exc:
             raise RuntimeError(
                 "DISCORD_CHANNEL_ID, NEWS_INTERVAL_MINUTES, NEWS_RECENT_HOURS, "
@@ -91,6 +99,14 @@ class Config:
                 "NEWS_INTERVAL_MINUTES, NEWS_RECENT_HOURS, NEWS_PUBLISH_BATCH_SIZE, "
                 "and NEWS_COMMAND_DEFAULT_LIMIT must be at least 1"
             )
+        if summary_length < 1:
+            summary_length = 1
+        if summary_min_sentences < 1 or summary_min_sentences > summary_length:
+            summary_min_sentences = 2
+        if not (0.0 <= dedup_threshold <= 1.0):
+            dedup_threshold = 0.6
+        if dedup_lookback_hours < 1:
+            dedup_lookback_hours = 168
         return cls(
             token=token,
             channel_id=parsed_channel_id,
@@ -100,4 +116,8 @@ class Config:
             publish_batch_size=publish_batch_size,
             command_default_limit=command_default_limit,
             devops_feeds_enabled=os.getenv("DEVOPS_FEEDS_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+            summary_length=summary_length,
+            summary_min_sentences=summary_min_sentences,
+            dedup_threshold=dedup_threshold,
+            dedup_lookback_hours=dedup_lookback_hours,
         )

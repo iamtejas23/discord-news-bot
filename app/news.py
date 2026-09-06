@@ -5,10 +5,11 @@ import html
 from html.parser import HTMLParser
 import logging
 import re
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
+import difflib
 import feedparser
 from dateutil import parser
 import pytz
@@ -139,10 +140,18 @@ def resolve_source_name(registry: dict[str, dict[str, str]], source: str) -> str
 
 
 class NewsService:
-    def __init__(self, database: Database, recent_news_hours: int = 24, devops_feeds_enabled: bool = True):
+    def __init__(self, database: Database, recent_news_hours: int = 24, devops_feeds_enabled: bool = True,
+                 summary_length: int = 3, summary_min_sentences: int = 2,
+                 dedup_threshold: float = 0.6):
         self.database = database
         self.recent_news_hours = recent_news_hours
         self.devops_feeds_enabled = devops_feeds_enabled
+        self.dedup_threshold = dedup_threshold
+        self.summarizer = ExtractiveSummarizer(
+            recent_news_hours=recent_news_hours,
+            summary_length=summary_length,
+            min_summary_sentences=summary_min_sentences,
+        )
 
     def feed_registry(self, devops_only: bool = False, feed_group: str | None = None) -> dict[str, dict[str, str]]:
         if feed_group:
@@ -223,22 +232,24 @@ class NewsService:
                     continue
                 if len(summary) > 800:
                     summary = summary[:800] + "..."
+                # Generate extractive summary from the article summary text
+                article_summary = self.summarizer.summarize(summary, title)
                 article = {
                     "url": url,
                     "source": name,
                     "title": title,
-                    "summary": summary,
+                    "summary": article_summary,  # stored summary
                     "published": item.get("published") or item.get("updated", ""),
                     "category": feed_config["category"],
                     "image_url": extract_image_url(item, url),
                     "feed_group": feed_group,
                     "devops_only": devops_only,
                 }
-                if self.database.claim(article):
+                if self.database.claim(article, story_dedup_threshold=self.dedup_threshold):
                     result.append(article)
                     LOGGER.info("Fetched DevOps article: %s", url) if devops_only else None
                 else:
-                    LOGGER.info("Skipping %s article %s: duplicate article", feed_label, url)
+                    LOGGER.info("Skipping %s article %s: duplicate or similar article", feed_label, url)
                 if len(result) >= limit:
                     return result
         return result
@@ -283,3 +294,147 @@ class NewsService:
 
 def ist_time() -> str:
     return datetime.now(timezone.utc).astimezone(IST).strftime("%d-%m-%Y %I:%M:%S %p IST")
+
+
+class SentenceScore(NamedTuple):
+    index: int
+    score: float
+    sentence: str
+
+
+class ExtractiveSummarizer:
+    """Deterministic extractive summarizer that scores sentences and selects top N."""
+
+    def __init__(
+        self,
+        recent_news_hours: int = 24,
+        summary_length: int = 3,
+        keyword_weight: float = 2.0,
+        number_weight: float = 1.5,
+        date_weight: float = 1.5,
+        position_weight: float = 1.0,
+        min_summary_sentences: int = 2,
+    ):
+        self.recent_news_hours = recent_news_hours
+        self.summary_length = summary_length
+        self.keyword_weight = keyword_weight
+        self.number_weight = number_weight
+        self.date_weight = date_weight
+        self.position_weight = position_weight
+        self.min_summary_sentences = min_summary_sentences
+        self._ist = pytz.timezone("Asia/Kolkata")
+
+    # ---- sentence splitting -----------------------------------------------------
+
+    _abbreviations = {"mr", "mrs", "ms", "dr", "prof", "jr", "sr", "st", "th", "etc", "e.g", "i.e", "vs"}
+
+    def _split_sentences(self, text: str) -> list[str]:
+        if not text:
+            return []
+        # Protect common abbreviations by temporarily replacing Dr./Mr./etc with placeholder
+        normalized = text
+        for abbr in self._abbreviations:
+            normalized = re.sub(rf"\b{abbr}\.", f"{abbr}_ABBR_", normalized)
+        # Split on sentence-ending punctuation followed by whitespace
+        sentences = re.split(r"(?<=[.!?])\s+", normalized)
+        sentences = [s.replace("_ABBR_", ".").strip() for s in sentences if s.strip()]
+        return sentences
+
+    # ---- scoring --------------------------------------------------------------
+
+    @staticmethod
+    def _score_sentence(
+        sentence: str,
+        title_words: set[str],
+        all_keywords: set[str],
+        has_number: bool,
+        has_date: bool,
+        position: int,
+        total: int,
+        keyword_weight: float = 2.0,
+        number_weight: float = 1.5,
+        date_weight: float = 1.5,
+        position_weight: float = 1.0,
+    ) -> float:
+        sent_tokens = set(re.findall(r"\b\w+\b", sentence.lower()))
+        score = len(sent_tokens & title_words)
+        score += len(sent_tokens & all_keywords) * keyword_weight
+        if has_number:
+            score += number_weight
+        if has_date:
+            score += date_weight
+        if total > 0:
+            score += (1.0 - (position / total) * 0.3) * position_weight
+        return score
+
+    # ---- summary generation ----------------------------------------------------
+
+    def summarize(self, text: str, title: str = "") -> str:
+        """Return a 2-4 sentence extractive summary of *text* based on *title*."""
+        if not text:
+            return "No summary available."
+
+        clean = clean_text(text)
+        sentences = self._split_sentences(clean)
+        if not sentences:
+            return "No summary available."
+
+        # Build score keys
+        title_words = set(re.findall(r"\b\w+\b", title.lower()))
+        all_keywords = set(kw.lower() for kw in KEYWORDS)
+
+        # Pre-compute per-sentence flags
+        scored: list[SentenceScore] = []
+        for idx, sentence in enumerate(sentences):
+            has_number = bool(re.search(r"\d", sentence))
+            has_date = bool(re.search(r"\d{1,4}", sentence))
+            score = self._score_sentence(
+                sentence, title_words, all_keywords, has_number, has_date, idx, len(sentences),
+                self.keyword_weight, self.number_weight,
+                self.date_weight, self.position_weight,
+            )
+            scored.append(SentenceScore(index=idx, score=score, sentence=sentence))
+
+        # Sort by score descending, then by original position for ties
+        scored.sort(key=lambda s: (-s.score, s.index))
+
+        # Select top N, respecting min/max
+        target_count = min(max(self.min_summary_sentences, self.summary_length), len(scored))
+        top = scored[:target_count]
+
+        # Preserve original order among selected
+        top.sort(key=lambda s: s.index)
+
+        summary_sentences = [s.sentence for s in top]
+        # If we still don't have enough, pad with first sentences
+        while len(summary_sentences) < self.min_summary_sentences and len(summary_sentences) < len(sentences):
+            summary_sentences.append(sentences[len(summary_sentences)])
+
+        summary = " ".join(summary_sentences[: self.summary_length])
+        return summary[:300] if summary else "No summary available."
+
+    # ---- story deduplication helpers (moved from top-level) -------------------
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Lowercase, strip ASCII punctuation, collapse whitespace."""
+        text = text.lower()
+        text = re.sub(r"[^\w\s]", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    @staticmethod
+    def jaccard_similarity(a: str, b: str) -> float:
+        set_a = set(a.split())
+        set_b = set(b.split())
+        if not set_a or not set_b:
+            return 0.0
+        intersection = len(set_a & set_b)
+        union = len(set_a | set_b)
+        return intersection / union if union else 0.0
+
+    @staticmethod
+    def sequence_similarity(a: str, b: str) -> float:
+        return float(
+            difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+        )
