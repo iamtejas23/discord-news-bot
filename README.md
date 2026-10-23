@@ -91,10 +91,10 @@ LOG_LEVEL=INFO
 Then start the bot:
 
 ```bash
-docker compose up -d --build
+APP_UID="$(id -u)" APP_GID="$(id -g)" docker compose up -d --build
 ```
 
-The compose file mounts `./data` to `/data`; keep that folder between deploys so the SQLite database continues preventing duplicate posts.
+The container runs as a non-root user whose UID/GID match the command's values. The compose file mounts `./data` to `/data`; keep that folder between deploys so the SQLite database continues preventing duplicate posts.
 
 ## CI/CD and OCI deployment
 
@@ -113,6 +113,6 @@ Configure a GitHub Environment named `production` under **Settings → Environme
 
 SonarQube Server must be reachable from GitHub Actions, and the project and quality gate must exist there. The workflow waits for that gate and fails when it does not pass. [SonarSource documents the token and host URL requirements](https://github.com/SonarSource/sonarqube-scan-action#environment-variables).
 
-Optionally set the `OCI_DEPLOY_PATH` variable on the `production` Environment. It defaults to `/opt/discord-news-bot`; the SSH user must be able to create and write this directory and run Docker Compose. The server must have Docker Engine and the Compose plugin installed. Create the deployment directory's `.env` file on the OCI server with `DISCORD_TOKEN` and `DISCORD_CHANNEL_ID` (plus any desired optional settings) before the first deployment. The workflow transfers the validated source over SSH while preserving that `.env` file and the `data/` SQLite volume, then runs `docker compose up -d --build`.
+Optionally set the `OCI_DEPLOY_PATH` variable on the `production` Environment. It defaults to `/opt/discord-news-bot`; the SSH user must be able to create and write this directory and run Docker Compose. The server must have Docker Engine and the Compose plugin installed. Create the deployment directory's `.env` file on the OCI server with `DISCORD_TOKEN` and `DISCORD_CHANNEL_ID` (plus any desired optional settings) before the first deployment. The workflow transfers the validated source over SSH while preserving that `.env` file and the `data/` SQLite volume. It builds the image with the OCI SSH user's UID/GID, stops the bot, adjusts the persistent data ownership through a temporary root container, and restarts the bot as that non-root UID/GID.
 
 The SSH connection requires strict host key checking; do not populate `OCI_KNOWN_HOSTS` from an unverified `ssh-keyscan` result. Keep the private key and application secrets only in GitHub Environment secrets or on the server, and rotate them if exposed. The workflow does not need OCI API keys because it deploys to the instance over SSH. Configure the matching `sonar.projectKey` in `sonar-project.properties` if it differs from `discord-news-bot`.

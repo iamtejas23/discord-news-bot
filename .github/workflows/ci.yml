@@ -166,8 +166,20 @@ jobs:
           rsync -az --delete --exclude='.env' --exclude='data/' \
             --exclude='.git/' -e "$RSYNC_RSH" ./ \
             "$OCI_USER@$OCI_HOST:$DEPLOY_PATH/"
-          "${SSH[@]}" "$OCI_USER@$OCI_HOST" \
-            "cd '$DEPLOY_PATH' && docker compose up -d --build \
-              --remove-orphans && docker compose ps"
+          "${SSH[@]}" "$OCI_USER@$OCI_HOST" bash -s -- "$DEPLOY_PATH" <<'REMOTE'
+          set -euo pipefail
+          DEPLOY_PATH="$1"
+          APP_UID="$(id -u)"
+          APP_GID="$(id -g)"
+          cd "$DEPLOY_PATH"
+          APP_UID="$APP_UID" APP_GID="$APP_GID" docker compose build
+          docker compose down
+          APP_UID="$APP_UID" APP_GID="$APP_GID" \
+            docker compose run --rm --user 0 --entrypoint chown \
+            discord-news-bot -R "$APP_UID:$APP_GID" /data
+          APP_UID="$APP_UID" APP_GID="$APP_GID" \
+            docker compose up -d --remove-orphans
+          docker compose ps
+          REMOTE
 
           rm -f "$HOME/.ssh/oci_deploy_key"
