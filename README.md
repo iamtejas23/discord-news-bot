@@ -95,3 +95,23 @@ docker compose up -d --build
 ```
 
 The compose file mounts `./data` to `/data`; keep that folder between deploys so the SQLite database continues preventing duplicate posts.
+
+## CI/CD and OCI deployment
+
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main`. It compiles the Python sources, audits the pinned Python dependencies with `pip-audit`, runs the configured SonarQube scan and waits for its quality gate, checks Terraform with Checkov when `.tf` files are present, scans the repository with Trivy, builds the Docker image, and scans that image with Trivy. High and critical Trivy findings fail the checks. Deployment runs only after all checks pass on `main`.
+
+Configure a GitHub Environment named `production` under **Settings → Environments**. Add required reviewers and, if desired, deployment branch restrictions for `main`. GitHub pauses the deploy job for the configured reviewers before it receives the Environment secrets. Add these secrets to that Environment:
+
+| Secret | Value |
+| --- | --- |
+| `SONAR_TOKEN` | SonarQube analysis token with permission to analyze this project |
+| `OCI_HOST` | OCI instance public DNS name or IP address |
+| `OCI_USER` | SSH user with access to the deployment directory and Docker Compose |
+| `OCI_SSH_KEY` | Private SSH deploy key for that user (use a dedicated key) |
+| `OCI_KNOWN_HOSTS` | Verified SSH host key line(s) for the OCI server, obtained and checked through a trusted channel |
+
+For SonarQube Server, also set the `SONAR_HOST_URL` Environment variable to the server's base URL. SonarQube Cloud does not need this value. SonarQube must be reachable from GitHub Actions, and the project and quality gate must exist in SonarQube. The workflow waits for that gate and fails when it does not pass. [SonarSource documents the token and host URL requirements](https://github.com/SonarSource/sonarqube-scan-action#environment-variables).
+
+Optionally set the `OCI_DEPLOY_PATH` variable on the `production` Environment. It defaults to `/opt/discord-news-bot`; the SSH user must be able to create and write this directory and run Docker Compose. The server must have Docker Engine and the Compose plugin installed. Create the deployment directory's `.env` file on the OCI server with `DISCORD_TOKEN` and `DISCORD_CHANNEL_ID` (plus any desired optional settings) before the first deployment. The workflow transfers the validated source over SSH while preserving that `.env` file and the `data/` SQLite volume, then runs `docker compose up -d --build`.
+
+The SSH connection requires strict host key checking; do not populate `OCI_KNOWN_HOSTS` from an unverified `ssh-keyscan` result. Keep the private key and application secrets only in GitHub Environment secrets or on the server, and rotate them if exposed. The workflow does not need OCI API keys because it deploys to the instance over SSH. Configure the matching `sonar.projectKey` in `sonar-project.properties` if it differs from `discord-news-bot`.

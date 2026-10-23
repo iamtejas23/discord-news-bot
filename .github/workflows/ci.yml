@@ -1,62 +1,130 @@
-name: Deploy Discord News Bot
+name: Secure CI and OCI deployment
 
 on:
+  pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-news-bot-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  quality-and-security:
+    name: Quality and security checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pip-audit
+
+      - name: Check Python syntax
+        run: python -m compileall -q app
+
+      - name: Audit Python dependencies
+        run: pip-audit --strict
+
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        with:
+          args: -Dsonar.qualitygate.wait=true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+
+      - name: Check Terraform with Checkov
+        if: ${{ hashFiles('**/*.tf') != '' }}
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          quiet: true
+          soft_fail: false
+
+      - name: Scan repository with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          skip-files: .env
+          skip-dirs: data
+          exit-code: '1'
+
+      - name: Build container image
+        run: docker build --pull -t discord-news-bot:${{ github.sha }} .
+
+      - name: Scan container image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: discord-news-bot:${{ github.sha }}
+          scan-type: image
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
 
   deploy:
-
+    name: Deploy to OCI
+    needs: quality-and-security
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-
+    environment:
+      name: production
+    permissions:
+      contents: read
     steps:
-
-      - name: Checkout repository
+      - name: Check out validated source
         uses: actions/checkout@v4
 
-
-      - name: Test Docker Build
+      - name: Deploy over verified SSH
+        env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
+          OCI_KNOWN_HOSTS: ${{ secrets.OCI_KNOWN_HOSTS }}
+          OCI_DEPLOY_PATH: ${{ vars.OCI_DEPLOY_PATH }}
         run: |
-          docker build \
-          -t discord-news-bot:test .
+          set -euo pipefail
+          : "${OCI_HOST:?Configure OCI_HOST in the production Environment}"
+          : "${OCI_USER:?Configure OCI_USER in the production Environment}"
+          : "${OCI_SSH_KEY:?Configure OCI_SSH_KEY in the production Environment}"
+          : "${OCI_KNOWN_HOSTS:?Configure OCI_KNOWN_HOSTS in the production Environment}"
+          [[ "$OCI_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo 'OCI_HOST must be a DNS name or IPv4 address' >&2; exit 1; }
+          [[ "$OCI_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || { echo 'OCI_USER contains unsupported characters' >&2; exit 1; }
+          DEPLOY_PATH="${OCI_DEPLOY_PATH:-/opt/discord-news-bot}"
+          case "$DEPLOY_PATH" in /*) ;; *) echo 'OCI_DEPLOY_PATH must be an absolute path' >&2; exit 1 ;; esac
+          case "$DEPLOY_PATH" in *[!a-zA-Z0-9_./-]*) echo 'OCI_DEPLOY_PATH contains unsupported characters' >&2; exit 1 ;; esac
+          case "$DEPLOY_PATH" in /|*/../*|*/..) echo 'OCI_DEPLOY_PATH must be a dedicated deployment directory' >&2; exit 1 ;; esac
 
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$OCI_SSH_KEY" > "$HOME/.ssh/oci_deploy_key"
+          chmod 600 "$HOME/.ssh/oci_deploy_key"
+          printf '%s\n' "$OCI_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
 
-      - name: Deploy to OCI
-        uses: appleboy/ssh-action@v1.2.0
+          SSH=(ssh -i "$HOME/.ssh/oci_deploy_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          RSYNC_RSH="ssh -i $HOME/.ssh/oci_deploy_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          "${SSH[@]}" "$OCI_USER@$OCI_HOST" "mkdir -p '$DEPLOY_PATH'"
+          rsync -az --delete --exclude='.env' --exclude='data/' --exclude='.git/' -e "$RSYNC_RSH" ./ "$OCI_USER@$OCI_HOST:$DEPLOY_PATH/"
+          "${SSH[@]}" "$OCI_USER@$OCI_HOST" "cd '$DEPLOY_PATH' && docker compose up -d --build --remove-orphans && docker compose ps"
 
-        with:
-
-          host: ${{ secrets.OCI_HOST }}
-
-          username: ${{ secrets.OCI_USER }}
-
-          key: ${{ secrets.OCI_SSH_KEY }}
-
-          script: |
-
-            cd /opt/discord-news-bot
-
-            echo "Pulling latest code..."
-            git pull origin main
-
-
-            echo "Stopping old containers..."
-            docker compose down --remove-orphans || true
-
-
-            echo "Removing old container if exists..."
-            docker rm -f discord-news-bot || true
-
-
-            echo "Building and starting application..."
-            docker compose up -d --build
-
-
-            echo "Cleaning unused images..."
-            docker image prune -f
-
-
-            echo "Deployment status:"
-            docker compose ps
+          rm -f "$HOME/.ssh/oci_deploy_key"
