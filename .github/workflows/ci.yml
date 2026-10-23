@@ -1,6 +1,7 @@
+---
 name: Secure CI and OCI deployment
 
-on:
+"on":
   pull_request:
   push:
     branches: [main]
@@ -32,7 +33,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pip-audit
 
       - name: Check Python syntax
         run: python -m compileall -q app
@@ -58,7 +61,7 @@ jobs:
           soft_fail: false
 
       - name: Scan repository with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -73,7 +76,7 @@ jobs:
         run: docker build --pull -t discord-news-bot:${{ github.sha }} .
 
       - name: Scan container image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: discord-news-bot:${{ github.sha }}
           scan-type: image
@@ -106,14 +109,33 @@ jobs:
           set -euo pipefail
           : "${OCI_HOST:?Configure OCI_HOST in the production Environment}"
           : "${OCI_USER:?Configure OCI_USER in the production Environment}"
-          : "${OCI_SSH_KEY:?Configure OCI_SSH_KEY in the production Environment}"
-          : "${OCI_KNOWN_HOSTS:?Configure OCI_KNOWN_HOSTS in the production Environment}"
-          [[ "$OCI_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo 'OCI_HOST must be a DNS name or IPv4 address' >&2; exit 1; }
-          [[ "$OCI_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || { echo 'OCI_USER contains unsupported characters' >&2; exit 1; }
+          : "${OCI_SSH_KEY:?Missing OCI_SSH_KEY environment secret}"
+          : "${OCI_KNOWN_HOSTS:?Missing OCI_KNOWN_HOSTS environment secret}"
+          [[ "$OCI_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || {
+            echo 'OCI_HOST must be a DNS name or IPv4 address' >&2
+            exit 1
+          }
+          [[ "$OCI_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || {
+            echo 'OCI_USER contains unsupported characters' >&2
+            exit 1
+          }
           DEPLOY_PATH="${OCI_DEPLOY_PATH:-/opt/discord-news-bot}"
-          case "$DEPLOY_PATH" in /*) ;; *) echo 'OCI_DEPLOY_PATH must be an absolute path' >&2; exit 1 ;; esac
-          case "$DEPLOY_PATH" in *[!a-zA-Z0-9_./-]*) echo 'OCI_DEPLOY_PATH contains unsupported characters' >&2; exit 1 ;; esac
-          case "$DEPLOY_PATH" in /|*/../*|*/..) echo 'OCI_DEPLOY_PATH must be a dedicated deployment directory' >&2; exit 1 ;; esac
+          case "$DEPLOY_PATH" in
+            /*) ;;
+            *) echo 'OCI_DEPLOY_PATH must be an absolute path' >&2; exit 1 ;;
+          esac
+          case "$DEPLOY_PATH" in
+            *[!a-zA-Z0-9_./-]*)
+              echo 'OCI_DEPLOY_PATH contains unsupported characters' >&2
+              exit 1
+              ;;
+          esac
+          case "$DEPLOY_PATH" in
+            /|*/../*|*/..)
+              echo 'OCI_DEPLOY_PATH must be a dedicated directory' >&2
+              exit 1
+              ;;
+          esac
 
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$OCI_SSH_KEY" > "$HOME/.ssh/oci_deploy_key"
@@ -121,10 +143,22 @@ jobs:
           printf '%s\n' "$OCI_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
 
-          SSH=(ssh -i "$HOME/.ssh/oci_deploy_key" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
-          RSYNC_RSH="ssh -i $HOME/.ssh/oci_deploy_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          SSH=(ssh -i "$HOME/.ssh/oci_deploy_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          RSYNC_RSH="ssh -i $HOME/.ssh/oci_deploy_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           "${SSH[@]}" "$OCI_USER@$OCI_HOST" "mkdir -p '$DEPLOY_PATH'"
-          rsync -az --delete --exclude='.env' --exclude='data/' --exclude='.git/' -e "$RSYNC_RSH" ./ "$OCI_USER@$OCI_HOST:$DEPLOY_PATH/"
-          "${SSH[@]}" "$OCI_USER@$OCI_HOST" "cd '$DEPLOY_PATH' && docker compose up -d --build --remove-orphans && docker compose ps"
+          rsync -az --delete --exclude='.env' --exclude='data/' \
+            --exclude='.git/' -e "$RSYNC_RSH" ./ \
+            "$OCI_USER@$OCI_HOST:$DEPLOY_PATH/"
+          "${SSH[@]}" "$OCI_USER@$OCI_HOST" \
+            "cd '$DEPLOY_PATH' && docker compose up -d --build \
+              --remove-orphans && docker compose ps"
 
           rm -f "$HOME/.ssh/oci_deploy_key"
