@@ -97,7 +97,9 @@ jobs:
   deploy:
     name: Deploy to OCI
     needs: quality-and-security
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     environment:
       name: production

@@ -98,7 +98,7 @@ The container runs as a non-root user whose UID/GID match the command's values. 
 
 ## CI/CD and OCI deployment
 
-`.github/workflows/ci.yml` runs on pull requests and pushes to `main`. It compiles the Python sources, audits the pinned Python dependencies with `pip-audit`, runs the configured SonarQube scan and waits for its quality gate, checks Terraform with Checkov when `.tf` files are present, scans the repository with Trivy, builds the Docker image, and scans that image with Trivy. High and critical Trivy findings fail the checks. Deployment runs only after all checks pass on `main`.
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main`. It compiles the Python sources, audits the pinned Python dependencies with `pip-audit`, runs the configured SonarQube scan and waits for its quality gate, checks Terraform with Checkov when `.tf` files are present, scans the repository with Trivy, builds the Docker image, and scans that image with Trivy. High and critical Trivy findings fail the checks. Deployment runs only after all checks pass on `main`. You can also select **Run workflow** on the Actions page and choose `main` to trigger a deployment manually; the `production` approval gate still applies.
 
 Add `SONAR_TOKEN` as a repository or organization Actions secret so the CI job can access it. For SonarQube Server, also define the `SONAR_HOST_URL` Actions variable with the server's base URL. If `SONAR_HOST_URL` is unset, the workflow defaults to SonarQube Cloud at `https://sonarcloud.io`. Create the SonarQube project first and ensure its project key (and, for SonarQube Cloud, organization key) matches `sonar-project.properties` and your SonarQube setup.
 
